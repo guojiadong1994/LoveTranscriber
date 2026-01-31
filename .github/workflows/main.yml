@@ -6,29 +6,32 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v3
+    # 1. 检出代码 (升级到 v4)
+    - uses: actions/checkout@v4
 
+    # 2. 设置 Python 环境 (升级到 v5)
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10' # 建议用 3.10 或 3.9，兼容性好
+        python-version: '3.10' 
 
+    # 3. 安装依赖
     - name: Install Dependencies
       run: |
         pip install -r LoveTranscriber/requirements.txt
         pip install pyinstaller
 
+    # 4. 打包 EXE
     - name: Build EXE
-      # 注意：
-      # 1. -F 打包成单文件
-      # 2. -w 去掉黑色控制台窗口
-      # 3. 指定 main.py 的路径
       run: |
         cd LoveTranscriber
         pyinstaller -F -w -n "LoveTranscriber" main.py
 
+    # 5. 上传产物 (关键修复：升级到 v4)
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: LoveTranscriber-EXE
         path: LoveTranscriber/dist/LoveTranscriber.exe
+        # v4 版本如果不加这一行，多次运行可能会报错，加上更保险
+        overwrite: true
