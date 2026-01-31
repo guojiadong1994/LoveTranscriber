@@ -15,9 +15,12 @@ jobs:
       with:
         python-version: '3.10' 
 
-    # 3. 安装依赖
+    # 3. 安装依赖 (关键优化：强制安装 CPU 版 Torch，防止 EXE 变成 3GB)
     - name: Install Dependencies
       run: |
+        # 先安装 CPU 版的 PyTorch (体积小，速度快)
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        # 再安装其他依赖
         pip install -r LoveTranscriber/requirements.txt
         pip install pyinstaller
 
@@ -25,7 +28,9 @@ jobs:
     - name: Build EXE
       run: |
         cd LoveTranscriber
-        pyinstaller -F -w -n "LoveTranscriber" main.py
+        # --clean 清理缓存
+        # --noconfirm 不询问确认
+        pyinstaller -F -w --clean --noconfirm -n "LoveTranscriber" main.py
 
     # 5. 上传产物 (关键修复：升级到 v4)
     - name: Upload Artifact
@@ -33,5 +38,4 @@ jobs:
       with:
         name: LoveTranscriber-EXE
         path: LoveTranscriber/dist/LoveTranscriber.exe
-        # v4 版本如果不加这一行，多次运行可能会报错，加上更保险
         overwrite: true
