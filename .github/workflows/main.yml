@@ -6,36 +6,52 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-    # 1. 检出代码 (升级到 v4)
     - uses: actions/checkout@v4
 
-    # 2. 设置 Python 环境 (升级到 v5)
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10' 
 
-    # 3. 安装依赖 (关键优化：强制安装 CPU 版 Torch，防止 EXE 变成 3GB)
-    - name: Install Dependencies
+    - name: Check Directory Structure
       run: |
-        # 先安装 CPU 版的 PyTorch (体积小，速度快)
+        ls -R
+        echo "正在检查文件位置..."
+
+    - name: Install Dependencies
+      # 这里的逻辑是：如果在根目录找不到 requirements.txt，就去 LoveTranscriber 文件夹找
+      run: |
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        # 再安装其他依赖
-        pip install -r LoveTranscriber/requirements.txt
+        if (Test-Path "requirements.txt") {
+          pip install -r requirements.txt
+        } elseif (Test-Path "LoveTranscriber/requirements.txt") {
+          pip install -r LoveTranscriber/requirements.txt
+        } else {
+          echo "Error: 找不到 requirements.txt"
+          exit 1
+        }
         pip install pyinstaller
 
-    # 4. 打包 EXE
     - name: Build EXE
+      # 这里的逻辑是：如果在根目录找到 main.py 就直接打，否则进文件夹打
+      # 关键修改：增加了 --collect-all openai_whisper 防止运行闪退
       run: |
-        cd LoveTranscriber
-        # --clean 清理缓存
-        # --noconfirm 不询问确认
-        pyinstaller -F -w --clean --noconfirm -n "LoveTranscriber" main.py
+        if (Test-Path "main.py") {
+          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper -n "LoveTranscriber" main.py
+        } elseif (Test-Path "LoveTranscriber/main.py") {
+          cd LoveTranscriber
+          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper -n "LoveTranscriber" main.py
+        } else {
+          echo "Error: 找不到 main.py"
+          exit 1
+        }
 
-    # 5. 上传产物 (关键修复：升级到 v4)
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: LoveTranscriber-EXE
-        path: LoveTranscriber/dist/LoveTranscriber.exe
+        # 自动通配符匹配，不管在哪里生成的exe都能找到
+        path: |
+          dist/LoveTranscriber.exe
+          LoveTranscriber/dist/LoveTranscriber.exe
         overwrite: true
