@@ -2,5 +2,4 @@ PyQt6
 requests
 openai-whisper
 torch
-openpyxl
-pandas
+
