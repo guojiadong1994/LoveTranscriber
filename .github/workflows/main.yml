@@ -1,4 +1,4 @@
-name: Build LoveTranscriber (Folder Mode)
+name: Build LoveTranscriber (Flat Mode)
 
 on: [push]
 
@@ -13,14 +13,11 @@ jobs:
       with:
         python-version: '3.10' 
 
-    - name: Check Directory
-      run: ls -R
-
     - name: Install Dependencies
       run: |
-        # 1. 强制安装 CPU 版 Torch (体积小)
+        # 安装 CPU 版 Torch
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        # 2. 安装其他依赖
+        # 安装其他依赖
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
@@ -28,33 +25,25 @@ jobs:
         }
         pip install pyinstaller
 
-    - name: Build EXE (Folder Mode)
+    - name: Build EXE (Flat Mode)
       run: |
-        # 确定 main.py 位置
-        if (Test-Path "main.py") {
-           $Target = "main.py"
-        } elseif (Test-Path "LoveTranscriber/main.py") {
-           cd LoveTranscriber
-           $Target = "main.py"
-        } else {
-           echo "Error: 找不到 main.py"
-           exit 1
-        }
+        if (Test-Path "main.py") { $Target = "main.py" } 
+        elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
+        else { echo "Error: Missing main.py"; exit 1 }
 
-        # 🚀 核心修改：使用 -D (Onedir) 模式，而非 -F
-        # 增加 --contents-directory "internal" 让根目录整洁一点
+        # ⚠️ 关键修改：去掉了 --contents-directory，使用默认结构
+        # 这样 python310.dll 就会直接在根目录，不会找不到
         pyinstaller -D -w --clean --noconfirm `
           --collect-all openai_whisper `
           --collect-all torch `
-          --contents-directory "libs" `
           -n "LoveTranscriber" `
           $Target
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: LoveTranscriber-Folder
-        # 上传生成的整个文件夹
+        name: LoveTranscriber-Final
+        # 上传整个文件夹
         path: |
           dist/LoveTranscriber
           LoveTranscriber/dist/LoveTranscriber
