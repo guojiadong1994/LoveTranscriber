@@ -2,49 +2,19 @@ import sys
 import os
 
 # ==============================================================================
-# ☢️ 最终修复：DLL 路径注入 (适配 _internal 结构)
+# 🚀 极简修复：只设置环境变量，依赖文件靠打包脚本搬运
 # ==============================================================================
-# 1. 防止 OpenMP 冲突 (解决 PyTorch 闪退的核心)
+# 1. 允许 OpenMP 重复加载 (防止冲突闪退)
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-import ctypes
-
+# 2. 只有在打包环境下才执行的路径注入 (作为最后一道保险)
 if getattr(sys, 'frozen', False):
-    # 获取程序根目录 (LoveTranscriber.exe 所在位置)
     base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    
-    # 定义所有可能存放 DLL 的路径
-    # ⚠️ 关键修正：加入了 _internal 目录的搜索
-    dll_paths = [
-        base_dir,
-        os.path.join(base_dir, '_internal'),                # PyInstaller 默认依赖目录
-        os.path.join(base_dir, '_internal', 'torch', 'lib'),# Torch 在 _internal 里
-        os.path.join(base_dir, 'torch', 'lib'),             # 兼容备用
-    ]
-    
-    # 临时目录兼容 (单文件模式)
-    if hasattr(sys, '_MEIPASS'):
-        dll_paths.append(sys._MEIPASS)
-        dll_paths.append(os.path.join(sys._MEIPASS, 'torch', 'lib'))
-
-    # 2. 修改环境变量 PATH
-    os.environ['PATH'] = os.pathsep.join(dll_paths) + os.pathsep + os.environ['PATH']
-
-    # 3. Python 3.8+ 专用加载
+    # 将程序根目录加入 DLL 搜索路径 (Python 3.8+ 必须)
     if hasattr(os, 'add_dll_directory'):
-        for p in dll_paths:
-            if os.path.exists(p):
-                try: os.add_dll_directory(p)
-                except: pass
-
-    # 4. 暴力预加载关键 DLL
-    critical_dlls = ['libiomp5md.dll', 'mkl_core.dll', 'mkl_intel_thread.dll', 'c10.dll']
-    for p in dll_paths:
-        for dll_name in critical_dlls:
-            dll_path = os.path.join(p, dll_name)
-            if os.path.exists(dll_path):
-                try: ctypes.CDLL(dll_path)
-                except: pass
+        try: os.add_dll_directory(base_dir)
+        except: pass
+    os.environ['PATH'] = base_dir + os.pathsep + os.environ['PATH']
 
 # ==============================================================================
 
@@ -53,11 +23,21 @@ import time
 import gc
 import requests
 import platform
-from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                             QLabel, QComboBox, QTextEdit, QProgressBar,
-                             QGroupBox, QMessageBox, QFileDialog, QSplitter)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
+# 延迟导入，防止环境未配置好就崩溃
+try:
+    from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                                 QLabel, QComboBox, QTextEdit, QProgressBar,
+                                 QGroupBox, QMessageBox, QFileDialog, QSplitter)
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+    from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
+    import whisper
+    import torch
+except ImportError as e:
+    # 如果导入失败，弹窗提示 (防止直接闪退看不到报错)
+    # 注意：这里只能用 ctypes 弹窗，因为 PyQt 可能还没加载
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(0, f"启动错误: {str(e)}\n请确保 libiomp5md.dll 在程序根目录！", "错误", 16)
+    sys.exit(1)
 
 # === 全局配置 ===
 SYSTEM_NAME = platform.system()
@@ -80,14 +60,14 @@ def setup_ffmpeg_path():
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 只要 ffmpeg 在 bin 文件夹里就行 (和 exe 同级)
+    # 1. 优先找同级 bin 目录
     bin_dir = os.path.join(base_dir, "bin")
     ffmpeg_in_bin = os.path.join(bin_dir, FFMPEG_NAME)
-    
     if os.path.exists(ffmpeg_in_bin):
         os.environ["PATH"] += os.pathsep + bin_dir
         return True, "✅ 内置引擎就绪"
     
+    # 2. 找系统路径
     if shutil.which("ffmpeg"):
         return True, "✅ 系统引擎就绪"
         
@@ -95,13 +75,7 @@ def setup_ffmpeg_path():
 
 HAS_FFMPEG, FFMPEG_MSG = setup_ffmpeg_path()
 
-try:
-    import whisper
-    import torch
-except ImportError:
-    whisper = None
-
-# === 线程与界面逻辑 ===
+# === 线程与界面逻辑 (保持不变) ===
 class ModelLoaderWorker(QThread):
     progress_signal = pyqtSignal(int, str)
     finished_signal = pyqtSignal(object)
@@ -119,9 +93,6 @@ class ModelLoaderWorker(QThread):
     def run(self):
         if not HAS_FFMPEG:
             self.error_signal.emit(f"无法启动：找不到 {FFMPEG_NAME}")
-            return
-        if not whisper:
-            self.error_signal.emit("未安装 openai-whisper")
             return
         if not os.path.exists(self.download_root):
             os.makedirs(self.download_root, exist_ok=True)

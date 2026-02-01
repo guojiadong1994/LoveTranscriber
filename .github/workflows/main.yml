@@ -1,4 +1,4 @@
-name: Build LoveTranscriber (Flat Mode)
+name: Build LoveTranscriber (Copy Fix)
 
 on: [push]
 
@@ -15,9 +15,9 @@ jobs:
 
     - name: Install Dependencies
       run: |
-        # 安装 CPU 版 Torch
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        # 安装其他依赖
+        # 强制无缓存安装，防止下载损坏
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir
+        
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
@@ -25,25 +25,43 @@ jobs:
         }
         pip install pyinstaller
 
-    - name: Build EXE (Flat Mode)
+    - name: Build EXE
       run: |
         if (Test-Path "main.py") { $Target = "main.py" } 
         elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
         else { echo "Error: Missing main.py"; exit 1 }
 
-        # ⚠️ 关键修改：去掉了 --contents-directory，使用默认结构
-        # 这样 python310.dll 就会直接在根目录，不会找不到
+        # 1. 正常打包 (不要任何花哨参数)
         pyinstaller -D -w --clean --noconfirm `
           --collect-all openai_whisper `
           --collect-all torch `
           -n "LoveTranscriber" `
           $Target
+        
+        # 2. 【核心修复】手动把 libiomp5md.dll 复制到 exe 旁边！
+        # 找到 Python 安装目录下的 torch/lib 目录
+        $TorchLib = python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+        $SourceDll = Join-Path $TorchLib "libiomp5md.dll"
+        
+        # 确定目标目录 (exe 所在的目录)
+        $DistDir = "dist/LoveTranscriber"
+        if (!(Test-Path $DistDir)) { $DistDir = "LoveTranscriber/dist/LoveTranscriber" }
+        
+        echo "Copying $SourceDll to $DistDir..."
+        Copy-Item -Path $SourceDll -Destination $DistDir -Force
+        
+        # 检查是否复制成功
+        if (Test-Path "$DistDir/libiomp5md.dll") {
+            echo "✅ DLL copied successfully!"
+        } else {
+            echo "❌ Failed to copy DLL!"
+            exit 1
+        }
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: LoveTranscriber-Final
-        # 上传整个文件夹
+        name: LoveTranscriber-Fixed
         path: |
           dist/LoveTranscriber
           LoveTranscriber/dist/LoveTranscriber
