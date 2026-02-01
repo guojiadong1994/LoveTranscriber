@@ -1,0 +1,13 @@
+
+
+=== 软件启动: Darwin | 25.2.0 ===
+开始任务: base
+模型目录: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
+进入下载阶段...
+/opt/anaconda3/envs/vtk/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py:186: UserWarning: The `resume_download` argument is deprecated and ignored in `snapshot_download`. Downloads always resume whenever possible.
+  warnings.warn(
+下载完成，进入加载阶段...
+模型加载成功！
+开始识别...
+
+任务全部完成
