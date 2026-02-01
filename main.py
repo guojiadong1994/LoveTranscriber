@@ -1,5 +1,12 @@
 import sys
 import os
+
+# === 关键修复：在导入任何库之前，强制指定 DLL 路径 ===
+# 这能解决 [WinError 1114] 和找不到 c10.dll 的问题
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # 将临时解压目录加入系统 PATH，确保 Windows 能找到依赖的 DLL
+    os.environ['PATH'] = sys._MEIPASS + os.pathsep + os.environ['PATH']
+
 import shutil
 import time
 import gc
