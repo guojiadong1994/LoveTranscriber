@@ -25,20 +25,14 @@ jobs:
       - name: Build EXE (No Console, Clean UI)
         shell: pwsh
         run: |
-          # 自动寻找 main.py 的位置
-          if (Test-Path "main.py") { 
-            $Target = "main.py" 
-          } elseif (Test-Path "LoveTranscriber/main.py") { 
-            cd LoveTranscriber
-            $Target = "main.py" 
-          } else { 
-            echo "Error: Missing main.py"
-            exit 1 
-          }
+          if (Test-Path "main.py") { $Target = "main.py" }
+          elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
+          else { echo "Error: Missing main.py"; exit 1 }
 
-          # ✅ -w : 去除黑框 (Windowed mode)
-          # ✅ -D : 文件夹模式 (方便你往里面放 tools 文件夹)
+          # ✅ -w : 去除黑框
+          # ✅ --collect-all zhconv : 【核心修复】强制收集 zhconv 的所有字典文件
           pyinstaller -D -w --clean --noconfirm `
+            --collect-all zhconv `
             -n "LoveTranscriber_Final" `
             $Target
 

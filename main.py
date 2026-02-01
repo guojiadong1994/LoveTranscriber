@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup, QSizePolicy, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF
-from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath, QIcon, QAction
+from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath, QIcon
 
 # ==============================================================================
 # ✅ 全局配置
@@ -58,7 +58,6 @@ MODEL_OPTIONS = [
 # ==============================================================================
 
 class ProgressButton(QPushButton):
-    """带进度条动画的按钮"""
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self._progress = 0.0
@@ -112,8 +111,6 @@ class ProgressButton(QPushButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
         rectf = QRectF(rect)
-
-        # 背景
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 22, 22)
@@ -121,7 +118,6 @@ class ProgressButton(QPushButton):
         if self._progress > 0:
             prog_width = max(30, (rect.width() * (self._progress / 100.0)))
             if prog_width > rect.width(): prog_width = rect.width()
-            
             path = QPainterPath()
             path.addRoundedRect(rectf, 22, 22)
             painter.setClipPath(path)
@@ -144,47 +140,25 @@ class ModelCard(QPushButton):
         self.default_color = color
         self.setCheckable(True)
         self.setFixedHeight(80) 
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
-        
-        # 标题
         self.l1 = QLabel(title)
         self.l1.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold)) 
         self.l1.setStyleSheet("border: none; background: transparent;")
         layout.addWidget(self.l1)
-
-        # 描述
         self.l2 = QLabel(desc)
         self.l2.setFont(QFont(UI_FONT, 9))
         self.l2.setStyleSheet("color: #666; border: none; background: transparent;")
         layout.addWidget(self.l2)
-
         self.update_style(False)
 
-    def set_missing(self):
-        """🔥 关键优化：如果缺文件，直接置灰"""
-        self.setEnabled(False)
-        self.l1.setText(f"{self.l1.text()} (缺文件)")
-        self.l1.setStyleSheet("color: #999; border: none; background: transparent;")
-        self.l2.setText("请检查 tools/whisper 目录")
-        self.setStyleSheet("QPushButton { background-color: #f0f0f0; border: 1px dashed #ccc; border-radius: 12px; }")
-
     def update_style(self, s):
-        if not self.isEnabled(): return # 如果禁用了就不变色
         if s:
-            self.setStyleSheet(
-                f"QPushButton {{ background-color: {self.default_color}15; "
-                f"border: 2px solid {self.default_color}; border-radius: 12px; }}"
-            )
+            self.setStyleSheet(f"QPushButton {{ background-color: {self.default_color}15; border: 2px solid {self.default_color}; border-radius: 12px; }}")
         else:
-            self.setStyleSheet(
-                "QPushButton { background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 12px; }"
-                "QPushButton:hover { border: 1px solid #bbb; background-color: #fcfcfc; }"
-            )
+            self.setStyleSheet("QPushButton { background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 12px; } QPushButton:hover { border: 1px solid #bbb; background-color: #fcfcfc; }")
 
 class ToggleButton(QPushButton):
-    """胶囊切换按钮"""
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
@@ -195,25 +169,9 @@ class ToggleButton(QPushButton):
 
     def update_style(self, checked):
         if checked:
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: #0078d7;
-                    color: white;
-                    border: none;
-                    border-radius: 10px;
-                    font-weight: bold;
-                }
-            """)
+            self.setStyleSheet("QPushButton { background-color: #0078d7; color: white; border: none; border-radius: 10px; font-weight: bold; }")
         else:
-            self.setStyleSheet("""
-                QPushButton {
-                    background-color: #f0f0f0;
-                    color: #666;
-                    border: 1px solid #ddd;
-                    border-radius: 10px;
-                }
-                QPushButton:hover { background-color: #e8e8e8; }
-            """)
+            self.setStyleSheet("QPushButton { background-color: #f0f0f0; color: #666; border: 1px solid #ddd; border-radius: 10px; } QPushButton:hover { background-color: #e8e8e8; }")
 
 # ==============================================================================
 # ✅ 核心逻辑线程
@@ -331,7 +289,7 @@ class TranscribeThread(QThread):
             self.error_signal.emit(str(e))
 
 # ==============================================================================
-# ✅ 主窗口 (功能完备版)
+# ✅ 主窗口 (修复高度布局)
 # ==============================================================================
 class MainWindow(QWidget):
     def __init__(self):
@@ -345,13 +303,11 @@ class MainWindow(QWidget):
         self.model_btns = []
         self.worker = None 
         
-        # 🔥 优化：设置窗口图标（如果根目录下有 icon.ico 就加载）
         icon_path = os.path.join(BASE_DIR, "icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         self.init_ui()
-        # 🔥 优化：初始化后立即检查模型文件
         self.check_models_existence()
 
     def init_ui(self):
@@ -418,6 +374,7 @@ class MainWindow(QWidget):
         # === 右侧结果区 (60%) ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
+        # 🔥 修改点 1：设置固定间距 10，让文本框、切换器、复制按钮紧紧挨着
         right_layout.setSpacing(10)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -425,11 +382,16 @@ class MainWindow(QWidget):
         self.txt = QTextEdit()
         self.txt.setPlaceholderText("转换结果将显示在这里...")
         self.txt.setFont(QFont(UI_FONT, 11))
-        self.txt.setMaximumHeight(380) 
+        # 🔥 修改点 2：删除了 setMaximumHeight。
+        # 让它默认拉伸，但是因为下面没有弹簧，它会占据所有“剩余空间”。
+        # 从而把底部的按钮推到最下面。
+        self.txt.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.txt.setStyleSheet("border: 1px solid #ddd; border-radius: 10px; padding: 10px; background-color: #fff;")
         right_layout.addWidget(self.txt)
 
-        right_layout.addStretch(1)
+        # 🔥 修改点 3：删除了这里的 addStretch。
+        # 之前这里有个弹簧，把按钮推到底部，把文本框留在上面，导致中间有空隙。
+        # 现在删掉它，文本框就会自动变高，直到顶到按钮的头顶。
 
         # 2. 底部功能区
         bottom_box = QVBoxLayout()
@@ -465,6 +427,7 @@ class MainWindow(QWidget):
         btn_copy.clicked.connect(self.copy_result)
         bottom_box.addWidget(btn_copy)
 
+        # 把底部功能区加到右侧布局
         right_layout.addLayout(bottom_box)
 
         main_layout.addWidget(left_widget, 4)
@@ -473,21 +436,7 @@ class MainWindow(QWidget):
         self.setStyleSheet("background-color: #fdfdfd;")
 
     def check_models_existence(self):
-        """🔥 自动检测模型文件是否存在，不存在则禁用按钮"""
         for btn in self.model_btns:
-            fname = MODEL_FILE_MAP.get(btn.code)
-            fpath = os.path.join(BASE_DIR, "tools", "whisper", fname)
-            # 如果是开发环境，可能路径在上一级，这里简单判断
-            if not os.path.exists(fpath):
-                # 尝试检查一下是不是没打包的情况
-                if not os.path.exists(os.path.join("tools", "whisper", fname)):
-                     # 真的缺文件了
-                     # 注意：这里我们不做严格封杀，只是视觉提示，因为打包后路径可能变
-                     # 但为了体验，可以加上(未检测到)
-                     pass 
-            
-            # 这里的逻辑是：运行时如果找不到，run线程会报错，所以界面上不需要强制禁用
-            # 但如果你想强制禁用，可以在这里写 btn.set_missing()
             pass 
 
     def on_model_click(self, b):
@@ -566,7 +515,7 @@ class MainWindow(QWidget):
             self.worker.wait(200)
         event.accept()
 
-# 🔥 启用高分屏适配 (Ultra 9 必备)
+# 🔥 启用高分屏适配
 if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
 if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
