@@ -1,11 +1,37 @@
 import sys
 import os
 
-# === 关键修复：在导入任何库之前，强制指定 DLL 路径 ===
-# 这能解决 [WinError 1114] 和找不到 c10.dll 的问题
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-    # 将临时解压目录加入系统 PATH，确保 Windows 能找到依赖的 DLL
-    os.environ['PATH'] = sys._MEIPASS + os.pathsep + os.environ['PATH']
+# ==================================================
+# 🚑 关键修复：DLL 路径强力注入 (放在所有 import 之前)
+# ==================================================
+if getattr(sys, 'frozen', False):
+    # 1. 确定程序所在的根目录
+    application_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+    
+    # 2. 定义可能存放 torch DLL 的所有角落
+    # 兼容: 文件夹模式(libs目录)、单文件模式(_MEIPASS)、普通模式
+    potential_paths = [
+        application_path,
+        os.path.join(application_path, 'libs'),                # 你的打包配置用了这个
+        os.path.join(application_path, 'libs', 'torch', 'lib'), # PyTorch 的老巢
+        os.path.join(application_path, 'torch', 'lib'),
+    ]
+    
+    # 如果是单文件模式，还有个临时目录
+    if hasattr(sys, '_MEIPASS'):
+        potential_paths.append(sys._MEIPASS)
+        potential_paths.append(os.path.join(sys._MEIPASS, 'torch', 'lib'))
+
+    # 3. 暴力注入 PATH 环境变量
+    # 把这些路径全部加到系统查找路径的最前面
+    new_path = os.environ['PATH']
+    for p in potential_paths:
+        if p and os.path.exists(p):
+            new_path = p + os.pathsep + new_path
+    
+    os.environ['PATH'] = new_path
+
+# ==================================================
 
 import shutil
 import time
