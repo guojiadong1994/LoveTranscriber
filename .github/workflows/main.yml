@@ -13,34 +13,27 @@ jobs:
       with:
         python-version: '3.10' 
 
-    - name: Check Directory Structure
-      run: |
-        ls -R
-        echo "正在检查文件位置..."
-
     - name: Install Dependencies
-      # 这里的逻辑是：如果在根目录找不到 requirements.txt，就去 LoveTranscriber 文件夹找
       run: |
+        # 安装 CPU 版 torch，防止显卡驱动导致文件过大
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        # 安装其他依赖
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
           pip install -r LoveTranscriber/requirements.txt
-        } else {
-          echo "Error: 找不到 requirements.txt"
-          exit 1
         }
         pip install pyinstaller
 
     - name: Build EXE
-      # 这里的逻辑是：如果在根目录找到 main.py 就直接打，否则进文件夹打
-      # 关键修改：增加了 --collect-all openai_whisper 防止运行闪退
       run: |
+        # 自动定位 main.py 目录
         if (Test-Path "main.py") {
-          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper -n "LoveTranscriber" main.py
+          # 关键修改：添加 --collect-all torch 防止 DLL 丢失
+          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper --collect-all torch -n "LoveTranscriber" main.py
         } elseif (Test-Path "LoveTranscriber/main.py") {
           cd LoveTranscriber
-          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper -n "LoveTranscriber" main.py
+          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper --collect-all torch -n "LoveTranscriber" main.py
         } else {
           echo "Error: 找不到 main.py"
           exit 1
@@ -50,7 +43,6 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: LoveTranscriber-EXE
-        # 自动通配符匹配，不管在哪里生成的exe都能找到
         path: |
           dist/LoveTranscriber.exe
           LoveTranscriber/dist/LoveTranscriber.exe
