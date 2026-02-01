@@ -5,30 +5,19 @@ import shutil
 import traceback
 import time
 
-# ==============================================================================
-# 🛡️ 核心环境配置 (必须放在最前面)
-# ==============================================================================
-
 # 1. 强制国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-# 2. 🔥 官方禁言：彻底关闭 HuggingFace 的进度条，防止打印乱码导致闪退
+# 2. 官方禁言
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120" # 超时放宽到120秒
 
-# 3. 增加网络超时宽容度 (设为 60秒)
-os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
-
-# 4. 黑洞类：吃掉所有不必要的打印
 class NullWriter:
     def write(self, text): pass
     def flush(self): pass
 
-# 5. 接管标准输出
 if getattr(sys, 'frozen', False):
     sys.stdout = NullWriter()
     sys.stderr = NullWriter()
-
-# ==============================================================================
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
@@ -52,6 +41,14 @@ MODEL_MAP = {
     "base":     "systran/faster-whisper-base",
     "large-v3": "systran/faster-whisper-large-v3",
     "small":    "systran/faster-whisper-small"
+}
+
+# 增加“最小体积”门槛 (MB)，防止加载空文件
+MODEL_MIN_SIZE = {
+    "medium": 1400,
+    "base": 130,
+    "large-v3": 2900,
+    "small": 400
 }
 
 MODEL_OPTIONS = [
@@ -84,15 +81,17 @@ class ProgressButton(QPushButton):
         self.update() 
 
     def auto_creep_progress(self):
-        # 丝滑进度逻辑
         current = self._progress
         increment = 0.0
+        # 下载阶段
         if current < 39.0:
             if current < 15.0: increment = 0.5 
             elif current < 30.0: increment = 0.1 
             else: increment = 0.01 
+        # 加载阶段
         elif current >= 40.0 and current < 49.0:
             increment = 0.05
+        # 识别阶段
         elif current >= 50.0 and current < 98.0:
             increment = 0.1
 
@@ -158,6 +157,14 @@ class WorkThread(QThread):
         self.repo_id = MODEL_MAP[model_code]
         self.is_running = True
 
+    def get_folder_size_mb(self, folder):
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(folder):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                total_size += os.path.getsize(fp)
+        return total_size / (1024 * 1024)
+
     def run(self):
         if not HAS_WHISPER:
             self.error_signal.emit("错误：环境不完整，缺少 faster-whisper")
@@ -172,39 +179,44 @@ class WorkThread(QThread):
             models_root = os.path.join(base_dir, "models")
             model_dir = os.path.join(models_root, f"models--{self.repo_id.replace('/', '--')}")
 
-            # --- 阶段 1: 下载 ---
-            self.status_signal.emit(f"⏳ 正在下载模型 (首次较慢)...")
+            # --- 阶段 1: 智能体检 & 下载 ---
+            self.status_signal.emit(f"⏳ 步骤 1/3: 检查模型完整性...")
             
+            # 1. 体检逻辑：如果文件夹存在，但太小，说明是尸体文件
+            if os.path.exists(model_dir):
+                current_size = self.get_folder_size_mb(model_dir)
+                min_size = MODEL_MIN_SIZE.get(self.model_code, 100)
+                
+                # 如果文件小于标准体积的 50%，判定为损坏
+                if current_size < (min_size * 0.5):
+                    self.status_signal.emit(f"⚠️ 模型文件不完整 ({int(current_size)}MB)，正在修复...")
+                    try: shutil.rmtree(model_dir)
+                    except: pass
+            
+            # 2. 开始下载 (使用单线程最稳)
             try:
-                # 🔥 修改重点：max_workers=1
-                # 单线程下载，虽然慢一丢丢，但是绝对不会触发 SSL 握手并发错误
-                # 稳如泰山
+                self.status_signal.emit(f"⏳ 步骤 1/3: 正在下载模型 (请勿关闭)...")
                 snapshot_download(
                     repo_id=self.repo_id,
                     repo_type="model",
                     local_dir=model_dir,
                     resume_download=True,
-                    max_workers=1 
+                    max_workers=1  # 坚持单线程，防止SSL握手失败
                 )
             except Exception as dl_err:
                 error_str = str(dl_err)
-                # 如果是网络超时，给出友好提示，而不是闪退
                 if "timeout" in error_str.lower() or "ssl" in error_str.lower():
-                    raise Exception("网络连接超时，请检查网络或重试。\n建议关闭 VPN 再试。")
-                
-                # 只有严重错误才清理目录
-                if os.path.exists(model_dir):
-                    try: shutil.rmtree(model_dir)
-                    except: pass
+                    raise Exception("网络连接超时。请检查网络，或关闭VPN后再试。")
                 raise Exception(f"下载失败: {error_str}")
 
             if not self.is_running: return
             self.progress_signal.emit(40, "加载中...")
 
             # --- 阶段 2: 加载 ---
-            self.status_signal.emit("🧠 正在唤醒 AI 引擎...")
+            self.status_signal.emit("🧠 步骤 2/3: 正在唤醒 AI 引擎...")
             
             try:
+                # 再次体检
                 model = WhisperModel(
                     model_dir, 
                     device="cpu", 
@@ -212,16 +224,18 @@ class WorkThread(QThread):
                     local_files_only=True
                 )
             except Exception as load_err:
+                # 只有在这里报错，才说明文件真的坏了
+                print(f"Load Error: {load_err}")
                 if os.path.exists(model_dir):
-                    try: shutil.rmtree(model_dir)
+                    try: shutil.rmtree(model_dir) # 删掉坏文件
                     except: pass
-                raise Exception(f"文件校验失败，已自动修复，请再次点击开始。")
+                raise Exception(f"模型文件加载失败，已自动删除缓存。\n请【点击开始】重新下载即可。")
 
             if not self.is_running: return
             self.progress_signal.emit(50, "分析中...")
 
             # --- 阶段 3: 识别 ---
-            self.status_signal.emit("🎧 正在分析语音内容...")
+            self.status_signal.emit("🎧 步骤 3/3: 正在分析语音内容...")
             
             segments, info = model.transcribe(
                 self.video_path, beam_size=5, language="zh",
@@ -302,10 +316,8 @@ class MainWindow(QWidget):
         self.selected_model = "medium"
         self.worker = None
         self.model_btns = []
-        
         self.fake_progress_timer = QTimer()
         self.fake_progress_timer.timeout.connect(self.update_fake_progress)
-
         self.init_ui()
 
     def init_ui(self):
@@ -454,8 +466,8 @@ class MainWindow(QWidget):
         self.fake_progress_timer.stop()
         self.reset_ui()
         self.lbl_status.setText("❌ 发生错误")
-        # 弹窗显示错误信息，而不是闪退
-        QMessageBox.warning(self, "错误", f"出错了: {msg}")
+        # 🔥 修改点：现在会弹窗告诉你错误，而不是直接闪退
+        QMessageBox.warning(self, "出错啦", f"程序遇到了问题:\n{msg}\n\n(已尝试自动清理缓存，请重试)")
 
     def reset_ui(self):
         self.btn_start.stop_processing()
