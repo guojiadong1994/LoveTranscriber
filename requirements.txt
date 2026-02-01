@@ -1,3 +1,4 @@
 PyQt6
 requests
 faster-whisper
+huggingface_hub
