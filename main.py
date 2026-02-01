@@ -1,78 +1,11 @@
 import sys
 import os
 import platform
-import shutil
-import traceback
 import time
 import subprocess
 import tempfile
-import json
+import traceback
 
-# ==============================================================================
-# 🛡️ 0. Ultra 9 / Windows 原生库防爆补丁（必须在任何大库 import 之前）
-# ==============================================================================
-def apply_ultra9_env_patch():
-    # =========================================================
-    # 目标：在 Windows + Core Ultra（大小核）上降低 OpenMP 初始化崩溃概率
-    # 原则：只保留“最核心”的设置，避免互相打架
-    # =========================================================
-
-    # 1) Intel OpenMP：禁用亲和性绑定（核心项）
-    os.environ["KMP_AFFINITY"] = "disabled"
-
-    # 2) 等待策略/阻塞：降低线程抢占与初始化阶段风险
-    os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
-    os.environ["KMP_BLOCKTIME"] = "0"
-
-    # 3) 初始化阶段强制单线程（核心项）
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
-    # 4) 指令集降级（双保险）
-    os.environ["MKL_ENABLE_INSTRUCTIONS"] = "AVX2"
-
-    # 5) HuggingFace 下载环境（与你当前项目一致）
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
-
-    # ❌ 刻意不设置以下项（避免日志里提示的“ignored because KMP_AFFINITY defined”）
-    # os.environ["OMP_PLACES"] = "cores"
-    # os.environ["OMP_PROC_BIND"] = "FALSE"
-    # os.environ["OMP_DYNAMIC"] = "FALSE"
-
-
-apply_ultra9_env_patch()
-
-# ==============================================================================
-# 🛡️ 1. 日志与目录配置
-# ==============================================================================
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-LOG_FILE = os.path.join(BASE_DIR, "crash.log")
-MODELS_ROOT = os.path.join(BASE_DIR, "models")
-
-import faulthandler
-try:
-    log_fs = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
-    sys.stdout = log_fs
-    sys.stderr = log_fs
-    faulthandler.enable(file=log_fs, all_threads=True)
-    print(f"===== START {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
-    print("Fix: Ultra9 env patch + worker subprocess isolation")
-except:
-    pass
-
-
-# ==============================================================================
-# ✅ GUI 依赖（仅 GUI 模式需要）
-# ==============================================================================
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTextEdit, QMessageBox, QFileDialog, QGridLayout
@@ -81,21 +14,45 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
 from PyQt6.QtCore import QRectF
 
-# === 全局配置 ===
+# ==============================================================================
+# 🛡️ 1. 目录与日志（保留你的 crash.log 习惯）
+# ==============================================================================
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+LOG_FILE = os.path.join(BASE_DIR, "crash.log")
+
+import faulthandler
+try:
+    log_fs = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
+    sys.stdout = log_fs
+    sys.stderr = log_fs
+    faulthandler.enable(file=log_fs, all_threads=True)
+    print(f"===== START {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
+    print("Engine: whisper.cpp (whisper-cli.exe) + ffmpeg")
+except:
+    pass
+
+# ==============================================================================
+# ✅ 全局配置
+# ==============================================================================
 IS_MAC = (platform.system() == 'Darwin')
 UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
-MODEL_MAP = {
-    "medium": "systran/faster-whisper-medium",
-    "base": "systran/faster-whisper-base",
-    "large-v3": "systran/faster-whisper-large-v3",
-    "small": "systran/faster-whisper-small"
+# UI 四个模式仍保留（但现在对应 ggml 模型文件）
+MODEL_FILE_MAP = {
+    "medium": "ggml-medium.bin",
+    "base": "ggml-base.bin",
+    "large-v3": "ggml-large-v3.bin",
+    "small": "ggml-small.bin",
 }
-MODEL_EXPECTED_SIZE = {"medium": 1500, "base": 145, "large-v3": 3050, "small": 480}
+
 MODEL_OPTIONS = [
     {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71"},
     {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db"},
-    {"name": "🧠 深度模式", "desc": "超准 but 稍慢", "code": "large-v3", "color": "#00cec9"},
+    {"name": "🧠 深度模式", "desc": "超准但模型很大", "code": "large-v3", "color": "#00cec9"},
     {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c"}
 ]
 
@@ -148,6 +105,7 @@ class ProgressButton(QPushButton):
         if not self._is_processing:
             super().paintEvent(event)
             return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rectf = QRectF(self.rect())
@@ -179,13 +137,16 @@ class ModelCard(QPushButton):
         self.default_color = color
         self.setCheckable(True)
         self.setFixedHeight(100)
+
         layout = QVBoxLayout(self)
         l1 = QLabel(title)
         l1.setFont(QFont(UI_FONT, 15, QFont.Weight.Bold))
         layout.addWidget(l1)
+
         l2 = QLabel(desc)
         l2.setFont(QFont(UI_FONT, 13))
         layout.addWidget(l2)
+
         self.update_style(False)
 
     def update_style(self, s):
@@ -200,137 +161,169 @@ class ModelCard(QPushButton):
             )
 
 # ==============================================================================
-# ✅ Worker 子进程线程：再怎么 access violation 也只崩子进程
+# ✅ 离线识别线程：ffmpeg 抽音频 + whisper-cli 转写
 # ==============================================================================
-class WorkerProcessThread(QThread):
+class TranscribeThread(QThread):
     status_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
     stage_signal = pyqtSignal(str)
     result_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
-    dl_signal = pyqtSignal(int, int)  # downloaded_mb, expected_mb
 
-    def __init__(self, video_path, model_code):
+    def __init__(self, media_path, model_code):
         super().__init__()
-        self.video_path = video_path
+        self.media_path = media_path
         self.model_code = model_code
         self.is_running = True
 
     def stop(self):
         self.is_running = False
 
+    def _tool_paths(self):
+        ffmpeg = os.path.join(BASE_DIR, "tools", "ffmpeg", "ffmpeg.exe")
+        whisper_cli = os.path.join(BASE_DIR, "tools", "whisper", "whisper-cli.exe")
+        model_file = MODEL_FILE_MAP.get(self.model_code, "ggml-base.bin")
+        model_path = os.path.join(BASE_DIR, "tools", "whisper", model_file)
+        return ffmpeg, whisper_cli, model_path, model_file
+
     def run(self):
         try:
-            expected_mb = MODEL_EXPECTED_SIZE.get(self.model_code, 1000)
-            self.status_signal.emit("⏳ 正在准备子进程...")
-            self.progress_signal.emit(1)
+            ffmpeg, whisper_cli, model_path, model_file = self._tool_paths()
 
-            # 结果文件
-            out_txt = os.path.join(tempfile.gettempdir(), f"love_transcribe_{int(time.time())}.txt")
+            if not os.path.exists(ffmpeg):
+                raise Exception(
+                    "缺少 ffmpeg.exe。\n"
+                    f"请放到：{os.path.join(BASE_DIR, 'tools', 'ffmpeg')}\n"
+                    "文件名必须是：ffmpeg.exe"
+                )
+            if not os.path.exists(whisper_cli):
+                raise Exception(
+                    "缺少 whisper-cli.exe。\n"
+                    f"请放到：{os.path.join(BASE_DIR, 'tools', 'whisper')}\n"
+                    "文件名必须是：whisper-cli.exe"
+                )
+            if not os.path.exists(model_path):
+                raise Exception(
+                    f"缺少模型文件：{model_file}\n"
+                    f"请放到：{os.path.join(BASE_DIR, 'tools', 'whisper')}\n"
+                    f"期望路径：{model_path}"
+                )
 
-            # 启动子进程（同一个 exe / 同一个 python）
-            exe = sys.executable
-            if getattr(sys, "frozen", False):
-                args = [exe, "--worker", self.video_path, self.model_code, out_txt]
-            else:
-                script = os.path.abspath(__file__)
-                args = [exe, script, "--worker", self.video_path, self.model_code, out_txt]
+            # -----------------------------
+            # 1) 抽取音频
+            # -----------------------------
+            self.stage_signal.emit("抽取音频 {0}%")
+            self.status_signal.emit("🎞️ 正在抽取音频...")
+            self.progress_signal.emit(5)
 
-            env = os.environ.copy()
-            # 再打一遍补丁，确保子进程一定吃到
-            env["KMP_AFFINITY"] = "disabled"
-            env["OMP_WAIT_POLICY"] = "PASSIVE"
-            env["KMP_BLOCKTIME"] = "0"
-            env["OMP_PROC_BIND"] = "FALSE"
-            env["OMP_PLACES"] = "cores"
-            env["OMP_DYNAMIC"] = "FALSE"
-            env["OMP_NUM_THREADS"] = "1"
-            env["MKL_NUM_THREADS"] = "1"
-            env["OPENBLAS_NUM_THREADS"] = "1"
-            env["MKL_ENABLE_INSTRUCTIONS"] = "AVX2"
-            env["HF_ENDPOINT"] = "https://hf-mirror.com"
-            env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            env["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+            tmp_wav = os.path.join(tempfile.gettempdir(), f"love_{int(time.time())}.wav")
+            cmd_ff = [
+                ffmpeg, "-y",
+                "-i", self.media_path,
+                "-vn",
+                "-ac", "1",
+                "-ar", "16000",
+                "-f", "wav",
+                tmp_wav
+            ]
 
-            p = subprocess.Popen(
-                args,
+            print("[FFMPEG]", " ".join(cmd_ff))
+            p = subprocess.run(
+                cmd_ff,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                cwd=BASE_DIR,
-                env=env,
                 text=True,
                 encoding="utf-8",
                 errors="replace"
             )
 
-            # 解析子进程输出（JSON 行）
-            self.stage_signal.emit("运行中 {0}%")
-            self.progress_signal.emit(5)
+            if p.returncode != 0 or (not os.path.exists(tmp_wav)):
+                raise Exception("ffmpeg 抽音频失败：\n" + p.stdout[-2000:])
 
+            if not self.is_running:
+                return
+
+            # -----------------------------
+            # 2) whisper.cpp 转写
+            # -----------------------------
+            self.stage_signal.emit("识别中 {0}%")
+            self.status_signal.emit("🧠 正在识别（离线）...")
+            self.progress_signal.emit(15)
+
+            out_dir = tempfile.gettempdir()
+            out_prefix = os.path.join(out_dir, f"love_out_{int(time.time())}")
+            out_txt = out_prefix + ".txt"
+
+            cmd_wh = [
+                whisper_cli,
+                "-m", model_path,
+                "-f", tmp_wav,
+                "-l", "zh",
+                "-otxt",
+                "-of", out_prefix
+            ]
+
+            print("[WHISPER]", " ".join(cmd_wh))
+
+            proc = subprocess.Popen(
+                cmd_wh,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(whisper_cli),
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+
+            prog = 15
+            last_lines = []
             while True:
                 if not self.is_running:
                     try:
-                        p.kill()
+                        proc.kill()
                     except:
                         pass
                     return
 
-                line = p.stdout.readline()
+                line = proc.stdout.readline()
                 if not line:
                     break
+
                 line = line.strip()
+                if line:
+                    last_lines.append(line)
+                    if len(last_lines) > 60:
+                        last_lines.pop(0)
 
-                # 同步写入 crash.log
-                try:
-                    print("[WORKER]", line)
-                except:
-                    pass
+                # 简单推进进度（不依赖特定输出格式，稳）
+                if prog < 95:
+                    prog += 1
+                    self.progress_signal.emit(prog)
 
-                # 解析 JSON 行
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        msg = json.loads(line)
-                    except:
-                        continue
-
-                    t = msg.get("type")
-                    if t == "status":
-                        self.status_signal.emit(msg.get("text", ""))
-                    elif t == "progress":
-                        self.progress_signal.emit(int(msg.get("value", 0)))
-                    elif t == "download":
-                        self.dl_signal.emit(int(msg.get("mb", 0)), int(msg.get("expected", expected_mb)))
-                    elif t == "stage":
-                        self.stage_signal.emit(msg.get("fmt", "运行中 {0}%"))
-                    elif t == "error":
-                        self.error_signal.emit(msg.get("text", "未知错误"))
-                    continue
-
-            code = p.wait()
-
-            # 0xC0000005 access violation 通常会是非 0 退出码（有时是 -1073741819）
+            code = proc.wait()
             if code != 0:
-                self.error_signal.emit(
-                    f"子进程异常退出 (exit={code})：\n"
-                    f"这通常是原生库 Access Violation。\n"
-                    f"请把 {LOG_FILE} 发我。"
-                )
-                return
+                raise Exception("whisper.cpp 识别失败：\n" + "\n".join(last_lines[-25:]))
 
             if not os.path.exists(out_txt):
-                self.error_signal.emit("子进程未生成结果文件，可能中途崩溃。请看 crash.log")
-                return
+                raise Exception(f"识别完成但未生成输出文件：{out_txt}")
 
             with open(out_txt, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read()
+                text = f.read().strip()
+
+            # 清理临时 wav（可选）
+            try:
+                os.remove(tmp_wav)
+            except:
+                pass
 
             self.progress_signal.emit(100)
             self.status_signal.emit("✅ 完成！")
             self.result_signal.emit(text)
 
         except Exception as e:
-            self.error_signal.emit(f"主进程异常：{e}\n看日志 crash.log")
-
+            print("[ERROR]", e)
+            traceback.print_exc()
+            self.error_signal.emit(str(e))
 
 # ==============================================================================
 # ✅ 主窗口
@@ -338,22 +331,24 @@ class WorkerProcessThread(QThread):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("❤️ 专属助手 (Ultra9 最终修复-子进程隔离版)")
+        self.setWindowTitle("❤️ 专属助手（离线稳定版 whisper.cpp）")
         self.resize(1100, 700)
         self.setAcceptDrops(True)
-        self.video_path = ""
+
+        self.media_path = ""
         self.selected_model = "medium"
         self.worker = None
         self.model_btns = []
+
         self.init_ui()
 
     def init_ui(self):
         main = QHBoxLayout()
         left = QVBoxLayout()
 
-        self.btn_import = QPushButton("\n📂 上传视频\n(子进程防崩版)\n")
+        self.btn_import = QPushButton("\n📂 上传视频/音频\n(离线稳定版)\n")
         self.btn_import.setFixedHeight(140)
-        self.btn_import.clicked.connect(self.sel_video)
+        self.btn_import.clicked.connect(self.sel_media)
         left.addWidget(self.btn_import)
 
         grid = QGridLayout()
@@ -365,7 +360,7 @@ class MainWindow(QWidget):
         left.addLayout(grid)
         self.on_clk(self.model_btns[0])
 
-        self.lbl_stat = QLabel("准备就绪")
+        self.lbl_stat = QLabel("准备就绪（请先放好 tools/ffmpeg 和 tools/whisper）")
         left.addWidget(self.lbl_stat)
 
         self.btn_start = ProgressButton("开始转换")
@@ -401,38 +396,36 @@ class MainWindow(QWidget):
         e.accept() if e.mimeData().hasUrls() else e.ignore()
 
     def dropEvent(self, e):
-        self.load(e.mimeData().urls()[0].toLocalFile())
+        urls = e.mimeData().urls()
+        if urls:
+            self.load(urls[0].toLocalFile())
 
-    def sel_video(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选文件", "", "Media (*.mp4 *.mov *.avi *.mp3)")
+    def sel_media(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选文件", "", "Media (*.mp4 *.mov *.avi *.mkv *.mp3 *.wav *.m4a)")
         if f:
             self.load(f)
 
     def load(self, p):
-        self.video_path = p
+        self.media_path = p
         self.btn_import.setText(f"已加载: {os.path.basename(p)}")
         self.btn_start.setEnabled(True)
 
     def start(self):
-        if not self.video_path:
+        if not self.media_path:
             QMessageBox.warning(self, "提示", "请先选择文件")
             return
 
         self.btn_import.setEnabled(False)
         self.btn_start.start_processing()
+        self.lbl_stat.setText("启动中...")
 
-        self.worker = WorkerProcessThread(self.video_path, self.selected_model)
+        self.worker = TranscribeThread(self.media_path, self.selected_model)
         self.worker.status_signal.connect(self.lbl_stat.setText)
         self.worker.progress_signal.connect(self.btn_start.set_progress)
         self.worker.stage_signal.connect(self.btn_start.set_format)
         self.worker.result_signal.connect(self.ok)
         self.worker.error_signal.connect(self.err)
-        self.worker.dl_signal.connect(self.on_dl)
         self.worker.start()
-
-    def on_dl(self, mb, expected):
-        # 显示“下载 xxM/yyM”
-        self.btn_start.set_text_override(f"下载 {mb}M/{expected}M")
 
     def ok(self, t):
         self.btn_start.set_progress(100)
@@ -446,109 +439,10 @@ class MainWindow(QWidget):
         self.lbl_stat.setText("❌ 出错")
         QMessageBox.warning(self, "错误", f"{m}\n\n看日志：{LOG_FILE}")
 
-
-# ==============================================================================
-# ✅ 子进程 worker 入口：这里允许崩（崩了也不带走 GUI）
-# ==============================================================================
-def worker_main(video_path, model_code, out_txt):
-    # 注意：worker 模式下才 import 这些重库，避免污染 GUI 进程
-    apply_ultra9_env_patch()
-
-    repo_id = MODEL_MAP[model_code]
-    models_root = os.path.join(BASE_DIR, "models")
-    os.makedirs(models_root, exist_ok=True)
-    model_base_dir = os.path.join(models_root, f"models--{repo_id.replace('/', '--')}")
-    expected_mb = MODEL_EXPECTED_SIZE.get(model_code, 1000)
-
-    def jprint(obj):
-        # 关键：ensure_ascii=True，保证 stdout 全 ASCII，彻底消灭乱码
-        print(json.dumps(obj, ensure_ascii=True), flush=True)
-
-    jprint({"type": "status", "text": "⏳ 正在校验/下载模型..."})
-    jprint({"type": "download", "mb": 0, "expected": expected_mb})
-    jprint({"type": "progress", "value": 5})
-    jprint({"type": "stage", "fmt": "运行中 {0}%"})
-
-    # 延迟 import
-    from huggingface_hub import snapshot_download
-    from faster_whisper import WhisperModel
-
-    # 下载（huggingface 会自动 resume）
-    real_model_path = snapshot_download(
-        repo_id=repo_id,
-        repo_type="model",
-        local_dir=model_base_dir,
-        max_workers=1
-    )
-
-    jprint({"type": "status", "text": "🧠 正在唤醒 AI 引擎..."})
-    jprint({"type": "progress", "value": 40})
-
-    # 关键：依次尝试不同 compute_type（某些机器 int8 内核更容易炸）
-    compute_try = ["int8", "int8_float32", "float32"]
-    last_err = None
-    model = None
-
-    for ct in compute_try:
-        try:
-            jprint({"type": "status", "text": f"🔧 加载模型 compute_type={ct} ..."})
-            model = WhisperModel(
-                real_model_path,
-                device="cpu",
-                compute_type=ct,
-                cpu_threads=1,
-                local_files_only=True
-            )
-            break
-        except Exception as e:
-            last_err = e
-            jprint({"type": "status", "text": f"⚠️ 加载失败，尝试降级：{ct} -> next"})
-            continue
-
-    if model is None:
-        jprint({"type": "error", "text": f"模型加载失败：{last_err}"})
-        sys.exit(2)
-
-    jprint({"type": "status", "text": "🎧 正在分析..."})
-    jprint({"type": "progress", "value": 55})
-
-    # transcribe 建议也尽量减少并发
-    segments, info = model.transcribe(
-        video_path,
-        beam_size=5,
-        language="zh",
-        initial_prompt="这是一段清晰的普通话，请加标点符号。",
-        vad_filter=False,
-        condition_on_previous_text=True
-    )
-
-    full_text = ""
-    dur = float(getattr(info, "duration", 0.0) or 0.0)
-
-    for seg in segments:
-        full_text += seg.text
-        if dur > 0:
-            pct = 55 + int((float(seg.end) / dur) * 44)
-            jprint({"type": "progress", "value": min(99, pct)})
-
-    with open(out_txt, "w", encoding="utf-8") as f:
-        f.write(full_text)
-
-    jprint({"type": "progress", "value": 100})
-    jprint({"type": "status", "text": "✅ 完成！"})
-    sys.exit(0)
-
-
 # ==============================================================================
 # ✅ 程序入口
 # ==============================================================================
 if __name__ == "__main__":
-    # 子进程 worker 模式
-    if len(sys.argv) >= 5 and sys.argv[1] == "--worker":
-        _, _, vpath, mcode, outtxt = sys.argv[:5]
-        worker_main(vpath, mcode, outtxt)
-
-    # GUI 模式
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()

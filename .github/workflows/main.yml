@@ -15,17 +15,13 @@ jobs:
         with:
           python-version: "3.10"
 
-      # 1) 构建工具（源码编译 ctranslate2 必备）
-      - name: Install build tools
+      - name: Install Dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --upgrade wheel setuptools cmake ninja
+          pip install pyinstaller
 
-      # 2) 安装项目依赖（先装一遍，后面会强制替换 ctranslate2）
-      - name: Install project dependencies
-        shell: pwsh
-        run: |
+          # 安装项目依赖（比如 PyQt6）
           if (Test-Path "requirements.txt") {
             pip install -r requirements.txt
           } elseif (Test-Path "LoveTranscriber/requirements.txt") {
@@ -34,30 +30,7 @@ jobs:
             echo "No requirements.txt found, skipping."
           }
 
-      # 3) 关键：从 GitHub 源码编译安装 ctranslate2，并禁用 OpenMP runtime
-      - name: Rebuild ctranslate2 from GitHub (OPENMP_RUNTIME=NONE)
-        shell: pwsh
-        run: |
-          # 卸载已安装的 wheel（如果存在）
-          pip uninstall -y ctranslate2
-
-          # 禁用 OpenMP runtime（核心：绕开 Intel OMP DLL 初始化不稳定）
-          $env:CMAKE_ARGS = "-DOPENMP_RUNTIME=NONE"
-
-          # 从 GitHub tag 编译安装（注意：这里用 v4.6.3，和你之前 wheel 版本一致）
-          pip install "ctranslate2 @ git+https://github.com/OpenNMT/CTranslate2.git@v4.6.3"
-
-          # 打印版本确认
-          python -c "import ctranslate2; print('ctranslate2:', ctranslate2.__version__)"
-
-      # 4) PyInstaller
-      - name: Install PyInstaller
-        shell: pwsh
-        run: |
-          pip install pyinstaller
-
-      # 5) 打包
-      - name: Build EXE (Portable)
+      - name: Build EXE (Portable, tools external)
         shell: pwsh
         run: |
           if (Test-Path "main.py") {
@@ -70,42 +43,11 @@ jobs:
             exit 1
           }
 
+          # ✅ 不打包 tools 目录（你手动复制到 exe 同级目录）
           pyinstaller -D -c --clean --noconfirm `
-            --collect-all faster_whisper `
-            --collect-all ctranslate2 `
-            --collect-all huggingface_hub `
             -n "LoveTranscriber_Portable" `
             $Target
 
-      # 6)（保守）仍做一次 libiomp5md.dll 去重
-      - name: Deduplicate OpenMP DLLs (prefer ctranslate2)
-        shell: pwsh
-        run: |
-          $dist1 = "dist/LoveTranscriber_Portable"
-          $dist2 = "LoveTranscriber/dist/LoveTranscriber_Portable"
-          $target = $null
-          if (Test-Path $dist1) { $target = $dist1 }
-          elseif (Test-Path $dist2) { $target = $dist2 }
-          else { echo "No dist folder found"; exit 0 }
-
-          echo "Target dist: $target"
-
-          $dlls = Get-ChildItem -Path $target -Recurse -Filter "libiomp5md.dll" -ErrorAction SilentlyContinue
-          echo "Found libiomp5md.dll count: $($dlls.Count)"
-
-          if ($dlls.Count -gt 1) {
-            $keepObj = $dlls | Where-Object { $_.FullName -match "ctranslate2" } | Select-Object -First 1
-            if ($null -eq $keepObj) { $keepObj = $dlls[0] }
-
-            echo "Keep: $($keepObj.FullName)"
-
-            $dlls | Where-Object { $_.FullName -ne $keepObj.FullName } | ForEach-Object {
-              echo "Remove: $($_.FullName)"
-              Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-            }
-          }
-
-      # 7) 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
