@@ -259,11 +259,10 @@ class TranscribeThread(QThread):
             out_prefix = os.path.join(tempfile.gettempdir(), f"love_out_{int(time.time())}")
             out_txt = out_prefix + ".txt"
             
-            # -l zh: 强制中文
-            # -p: 提示词强制简体
+            # 🔥 核心修改：去掉了 -p 参数，防止报错！
             cmd_wh = [
                 whisper_cli, "-m", model_path, "-f", tmp_wav, 
-                "-l", "zh", "-p", "请用简体中文。", 
+                "-l", "zh", # 依然保留强制中文
                 "-otxt", "-of", out_prefix
             ]
 
@@ -279,7 +278,7 @@ class TranscribeThread(QThread):
             t.daemon = True
             t.start()
 
-            # 🚀 进度条：极简匀速
+            # 🚀 进度条：超级慢速匀速版
             current_prog = 5.0
             
             while True:
@@ -291,7 +290,9 @@ class TranscribeThread(QThread):
                     return
                 
                 if current_prog < 99.0:
-                    current_prog += 1.5 
+                    # 🔥 修改点：步长从 1.5 改为 0.5 (慢了 3 倍)
+                    # 这样进度条会走得非常稳，不会一下跑完
+                    current_prog += 0.5 
                     self.progress_signal.emit(int(current_prog))
                 
                 time.sleep(0.1) 
@@ -339,7 +340,6 @@ class MainWindow(QWidget):
         # === 左侧控制区 (40%) ===
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        # 左右两侧的内部间距保持一致，方便对齐
         left_layout.setSpacing(10) 
         left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
@@ -385,7 +385,6 @@ class MainWindow(QWidget):
         self.lbl_stat.setStyleSheet("color: #888; font-size: 13px; margin-bottom: 2px;")
         left_layout.addWidget(self.lbl_stat)
 
-        # 弹簧放在按钮上面，把按钮推到底部
         left_layout.addStretch(1)
 
         self.btn_start = ProgressButton("✨ 开始转换")
@@ -397,7 +396,7 @@ class MainWindow(QWidget):
         # === 右侧结果区 (60%) ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(10) # 间距与左侧保持一致
+        right_layout.setSpacing(10) 
 
         # 1. 文本框
         self.txt = QTextEdit()
@@ -408,10 +407,9 @@ class MainWindow(QWidget):
         right_layout.addWidget(self.txt)
 
         # 2. 底部功能区
-        # 🔥 关键：设置 margin 为 0，确保像素级对齐
         bottom_box = QVBoxLayout()
         bottom_box.setSpacing(10)
-        bottom_box.setContentsMargins(0, 0, 0, 0) # <--- 这一句实现了底对底对齐
+        bottom_box.setContentsMargins(0, 0, 0, 0) 
 
         toggles_layout = QHBoxLayout()
         toggles_layout.setSpacing(10)
