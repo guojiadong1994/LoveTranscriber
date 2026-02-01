@@ -8,54 +8,86 @@ import socket
 import ctypes
 
 # ==============================================================================
-# 🛡️ 0. 必须最先执行的“保命”配置 (针对 Intel Ultra 9)
+# 🛡️ 0. 必须最先执行的“保命”配置 (针对 Intel Ultra 9 内存冲突)
 # ==============================================================================
 
-# 【核心修复 1】强制降级指令集
-# Ultra 9 的新指令集会导致 CTranslate2 崩溃，强制用 AVX2 虽然理论慢 1%，但绝对稳！
+# 【核心修复】强制降级指令集，防止 Ultra 9 触发 Access Violation
 os.environ["MKL_ENABLE_INSTRUCTIONS"] = "AVX2"
-
-# 【核心修复 2】开启 GEMM 实验性支持
-# 这是 CTranslate2 官方给出的针对 Windows 访问冲突的修复开关
 os.environ["CT2_USE_EXPERIMENTAL_PACKED_GEMM"] = "1"
 
-# 【核心修复 3】限制并发
-# 防止大小核调度导致的死锁
+# 【防死锁】初始化时强制单线程，防止 MKL 库打架
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# 强制国内镜像
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# 即使是调试版，也建议关掉官方进度条，防止编码报错，我们自己打印进度
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+
 # ==============================================================================
-# 🛡️ 1. 确定“大本营”目录
+# 🛡️ 1. 双重日志系统 (屏幕+文件)
 # ==============================================================================
+
+# 确定大本营目录
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 LOG_FILE = os.path.join(BASE_DIR, "crash.log")
-MODELS_ROOT = os.path.join(BASE_DIR, "models")
 
-# ==============================================================================
-# 🛡️ 2. 底层崩溃捕捉
-# ==============================================================================
+class DualWriter:
+    """
+    这个类的作用是：
+    1. 把字写在黑框框里 (给你看)
+    2. 把字写在 txt 文件里 (给开发者看)
+    保证一条报错都漏不掉！
+    """
+    def __init__(self, original_stream, log_file_path):
+        self.original_stream = original_stream
+        self.log_file = open(log_file_path, "w", encoding="utf-8", buffering=1) # "w" 模式每次清空旧日志
+
+    def write(self, message):
+        # 1. 屏幕输出
+        try:
+            if self.original_stream:
+                self.original_stream.write(message)
+                self.original_stream.flush()
+        except: pass
+        
+        # 2. 文件记录
+        try:
+            self.log_file.write(message)
+            self.log_file.flush()
+        except: pass
+
+    def flush(self):
+        try:
+            if self.original_stream: self.original_stream.flush()
+        except: pass
+        try: self.log_file.flush()
+        except: pass
+
+# 立即接管输出
+sys.stdout = DualWriter(sys.stdout, LOG_FILE)
+sys.stderr = DualWriter(sys.stderr, LOG_FILE)
+
 import faulthandler
-
+# 开启底层崩溃捕捉 (针对 Access Violation)
+# 注意：faulthandler 只能绑定一个文件句柄，我们绑定到日志文件
 try:
-    log_fs = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
-    sys.stdout = log_fs
-    sys.stderr = log_fs
-    faulthandler.enable(file=log_fs, all_threads=True)
-    
-    print(f"===== APP START {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
-    print(f"CPU Fix: AVX2 Enforced, GEMM Packed Enabled")
+    faulthandler.enable(file=sys.stdout.log_file, all_threads=True)
 except:
-    pass 
+    print("Warning: faulthandler init failed")
 
-# 其他环境变量
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+print(f"===== APP START {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
+print(f"System: {platform.uname()}")
+print(f"Fix applied: AVX2 Enforced")
 
+# ==============================================================================
+# 🛡️ 2. 导入 UI 和 AI 库
+# ==============================================================================
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
                              QFrame, QGridLayout)
@@ -185,7 +217,7 @@ class ProgressButton(QPushButton):
         else: display_text = self.format_str.format(int(self._progress))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, display_text)
 
-# === 监控线程 ===
+# === 监控线程 (监控 BASE_DIR/models) ===
 class DownloadMonitor(QThread):
     progress_update = pyqtSignal(int, int, int)
     def __init__(self, target_folder, expected_size_mb):
@@ -235,8 +267,12 @@ class WorkThread(QThread):
             return
 
         try:
-            os.makedirs(MODELS_ROOT, exist_ok=True)
-            model_base_dir = os.path.join(MODELS_ROOT, f"models--{self.repo_id.replace('/', '--')}")
+            # 1. 确保模型目录存在 (在 BASE_DIR 下)
+            models_root = os.path.join(BASE_DIR, "models")
+            os.makedirs(models_root, exist_ok=True)
+            
+            # Huggingface cache 结构目录
+            model_base_dir = os.path.join(models_root, f"models--{self.repo_id.replace('/', '--')}")
             print(f"Model Base Dir: {model_base_dir}")
 
             # --- 阶段 1: 下载 ---
@@ -246,6 +282,7 @@ class WorkThread(QThread):
 
             try:
                 print("Calling snapshot_download...")
+                # 使用返回值获取真实路径
                 real_model_path = snapshot_download(
                     repo_id=self.repo_id,
                     repo_type="model",
@@ -257,7 +294,7 @@ class WorkThread(QThread):
             except Exception as dl_err:
                 print(f"Download Error: {dl_err}")
                 self.monitor_signal.emit(False, "", 0)
-                # 容错机制
+                # 容错：尝试使用 base_dir
                 if os.path.exists(model_base_dir) and self.get_size(model_base_dir) > (expected_mb * 0.8):
                     print("Fallback to local cache...")
                     self.status_signal.emit("⚠️ 网络微恙，尝试使用本地缓存...")
@@ -276,22 +313,21 @@ class WorkThread(QThread):
             print(f"Init WhisperModel with path: {real_model_path}")
             
             try:
-                # 🔥 终极兼容配置 🔥
-                # 1. 强制 float32
-                # 2. 线程数=1 (初始化时单线程，防止 MKL 冲突)
-                # 3. device="cpu"
+                # 🔥 Ultra 9 防崩配置 🔥
+                # 1. float32: 兼容性最好
+                # 2. cpu_threads=1: 初始化时单线程，避免 MKL 冲突
                 model = WhisperModel(
                     real_model_path, 
                     device="cpu", 
                     compute_type="float32",
-                    cpu_threads=1, # ⚠️ 初始化用 1 个线程最安全，之后计算会自动调度
+                    cpu_threads=1, 
                     local_files_only=True 
                 )
                 print("Model Loaded Successfully!")
             except Exception as load_err:
                 print(f"CRASH DURING LOAD: {load_err}")
                 traceback.print_exc()
-                raise Exception(f"模型加载失败，请把 crash.log 发给开发者。\n错误: {str(load_err)}")
+                raise Exception(f"加载失败 (详见黑框/日志)\n错误: {str(load_err)}")
 
             if not self.is_running: return
             self.stage_signal.emit("识别中 {0}%")
@@ -362,7 +398,7 @@ class ModelCard(QPushButton):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("❤️ 专属语音转文字助手 (Ultra9 稳定版)")
+        self.setWindowTitle("❤️ 调试修复版 (Ultra9)")
         self.resize(1100, 700) 
         self.setAcceptDrops(True)
         self.video_path = ""
@@ -376,7 +412,7 @@ class MainWindow(QWidget):
         main_layout = QHBoxLayout()
         left_widget = QWidget(); left_layout = QVBoxLayout(left_widget)
         
-        self.import_area = QPushButton("\n📂 点击上传 / 拖拽视频\n(Ultra9 稳定版)\n")
+        self.import_area = QPushButton("\n📂 点击上传 / 拖拽视频\n(黑框+日志双重监控)\n")
         self.import_area.setFixedHeight(140)
         self.import_area.clicked.connect(self.select_video)
         left_layout.addWidget(self.import_area)
@@ -452,7 +488,7 @@ class MainWindow(QWidget):
         self.reset_ui()
         self.lbl_status.setText("❌ 出错")
         log_path = os.path.join(BASE_DIR, "crash.log")
-        QMessageBox.warning(self, "错误", f"发生错误: {msg}\n\n详细日志已保存在:\n{log_path}")
+        QMessageBox.warning(self, "错误", f"发生错误: {msg}\n\n详细日志已保存至:\n{log_path}")
     def reset_ui(self):
         self.btn_start.stop_processing()
         self.import_area.setEnabled(True)

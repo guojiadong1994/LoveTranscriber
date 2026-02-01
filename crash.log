@@ -1,13 +1,13 @@
-===== APP START 2026-02-01 22:22:34 =====
-CPU Fix: AVX2 Enforced, GEMM Packed Enabled
+/opt/anaconda3/envs/vtk/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py:186: UserWarning: The `resume_download` argument is deprecated and ignored in `snapshot_download`. Downloads always resume whenever possible.
+  warnings.warn(
+ machine='arm64')
+Fix applied: AVX2 Enforced
 Importing faster_whisper...
 Importing huggingface_hub...
 ✅ Libraries imported successfully
 --- TASK START: base ---
 Model Base Dir: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
 Calling snapshot_download...
-/opt/anaconda3/envs/vtk/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py:186: UserWarning: The `resume_download` argument is deprecated and ignored in `snapshot_download`. Downloads always resume whenever possible.
-  warnings.warn(
 ✅ Real Snapshot Path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
 Init WhisperModel with path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
 Model Loaded Successfully!
