@@ -1,4 +1,4 @@
-name: Build LoveTranscriber (Simple)
+name: Build LoveTranscriber (Faster-Whisper Edition)
 
 on: [push]
 
@@ -15,11 +15,17 @@ jobs:
 
     - name: Install Dependencies
       run: |
+        # 强制更新 pip
+        python -m pip install --upgrade pip
+        
+        # 1. 安装项目依赖
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
           pip install -r LoveTranscriber/requirements.txt
         }
+        
+        # 2. 补装打包工具
         pip install pyinstaller
 
     - name: Build EXE
@@ -28,10 +34,10 @@ jobs:
         elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
         else { echo "Error: Missing main.py"; exit 1 }
 
-        # 使用文件夹模式 (-D)
-        # 收集 faster_whisper 模块
+        # 3. 打包命令 (加了 ctranslate2 的收集，防止漏文件)
         pyinstaller -D -w --clean --noconfirm `
           --collect-all faster_whisper `
+          --collect-all ctranslate2 `
           -n "LoveTranscriber" `
           $Target
 

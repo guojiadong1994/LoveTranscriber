@@ -1,33 +1,114 @@
 import sys
 import os
-import time
 import platform
-import threading
 
-# 界面库
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                             QLabel, QComboBox, QTextEdit, QProgressBar,
-                             QGroupBox, QMessageBox, QFileDialog, QSplitter, QFrame)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QIcon, QAction
-
-# 核心库：Faster Whisper (延迟加载，防止启动卡顿)
-try:
-    from faster_whisper import WhisperModel
-    HAS_WHISPER = True
-except ImportError:
-    HAS_WHISPER = False
+                             QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
+                             QFrame, QGridLayout, QStyleOptionButton, QStyle)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF
+from PyQt6.QtGui import QFont, QColor, QPalette, QPainter, QBrush, QPen, QPainterPath
 
 # === 全局配置 ===
 IS_MAC = (platform.system() == 'Darwin')
 UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
-# === 核心工作线程 (加载+识别一体化) ===
+MODEL_OPTIONS = [
+    {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71"},
+    {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db"},
+    {"name": "🧠 深度模式", "desc": "超准但稍慢", "code": "large-v3", "color": "#00cec9"},
+    {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c"}
+]
+
+# === 自定义：带进度条的按钮 ===
+class ProgressButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self._progress = 0.0
+        self._is_processing = False
+        self.default_text = text
+        self.processing_text = "转换中 {0}%"
+        
+        self.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d7; 
+                color: white; 
+                border-radius: 30px;
+                font-weight: bold;
+                font-size: 20px; 
+            }
+            QPushButton:hover { background-color: #0063b1; }
+            QPushButton:pressed { background-color: #005a9e; }
+            QPushButton:disabled { background-color: #cccccc; color: #888; }
+        """)
+
+    def set_progress(self, value):
+        if value > self._progress:
+            self._progress = float(value)
+        self.setText(self.processing_text.format(int(self._progress)))
+        self.update() 
+
+    def increment_fake_progress(self, amount=0.2):
+        if self._progress < 99.0:
+            self._progress += amount
+            if self._progress > 99.0: self._progress = 99.0
+            self.setText(self.processing_text.format(int(self._progress)))
+            self.update()
+
+    def start_processing(self):
+        self._is_processing = True
+        self._progress = 0.0
+        self.setEnabled(False) 
+        self.update()
+
+    def stop_processing(self):
+        self._is_processing = False
+        self._progress = 0.0
+        self.setText(self.default_text)
+        self.setEnabled(True)
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._is_processing:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        rectf = QRectF(rect)
+
+        # 1. 背景
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#f0f0f0"))
+        painter.drawRoundedRect(rectf, 30, 30)
+
+        # 2. 进度条
+        if self._progress > 0:
+            prog_width = (rect.width() * (self._progress / 100.0))
+            if prog_width < 30: prog_width = 30
+            
+            path = QPainterPath()
+            path.addRoundedRect(rectf, 30, 30)
+            painter.setClipPath(path)
+            
+            painter.setBrush(QColor("#0078d7"))
+            painter.drawRect(0, 0, int(prog_width), int(rect.height()))
+            painter.setClipping(False)
+
+        # 3. 文字
+        painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
+        font = self.font()
+        font.setPointSize(16) 
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+# === 核心工作线程 ===
 class WorkThread(QThread):
-    status_signal = pyqtSignal(str)   # 更新状态文字
-    progress_signal = pyqtSignal(int) # 更新进度条 (0-100)
-    result_signal = pyqtSignal(str)   # 返回结果
-    error_signal = pyqtSignal(str)    # 报错
+    status_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int)
+    result_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
 
     def __init__(self, video_path, model_size):
         super().__init__()
@@ -36,16 +117,16 @@ class WorkThread(QThread):
         self.is_running = True
 
     def run(self):
-        if not HAS_WHISPER:
+        # 延迟导包：让软件启动时不加载重型库
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
             self.error_signal.emit("错误：未检测到 faster-whisper 库！")
             return
 
         try:
-            # --- 第1步：加载模型 ---
-            self.status_signal.emit("⏳ 第1步：正在唤醒 AI 大脑 (加载模型)...")
-            self.progress_signal.emit(10)
+            self.status_signal.emit("⏳ 阶段 1/3: 正在唤醒 AI 引擎 (首次需加载库)...")
             
-            # 获取程序运行目录
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
             else:
@@ -53,7 +134,6 @@ class WorkThread(QThread):
             
             model_dir = os.path.join(base_dir, "models")
             
-            # 加载模型 (自动下载/读取)
             model = WhisperModel(
                 self.model_size, 
                 device="cpu", 
@@ -62,271 +142,313 @@ class WorkThread(QThread):
             )
             
             if not self.is_running: return
-            self.progress_signal.emit(30)
+            self.progress_signal.emit(20)
 
-            # --- 第2步：开始识别 ---
-            self.status_signal.emit(f"🎧 第2步：正在认真听写中...\n({os.path.basename(self.video_path)})")
+            self.status_signal.emit("🎧 阶段 2/3: 正在分析语音内容...")
             
             segments, info = model.transcribe(
-                self.video_path, 
-                beam_size=5, 
-                language="zh",
+                self.video_path, beam_size=5, language="zh",
                 initial_prompt="这是一段清晰的普通话，请加标点符号。"
             )
 
             full_text = ""
-            # 这是一个估算进度的简易方法
             total_duration = info.duration
             current_time = 0
+
+            self.status_signal.emit("📝 阶段 3/3: 正在生成文字...")
 
             for segment in segments:
                 if not self.is_running: return
                 full_text += segment.text
                 current_time = segment.end
                 
-                # 计算进度 30% -> 95%
                 if total_duration > 0:
-                    progress = 30 + int((current_time / total_duration) * 65)
-                    self.progress_signal.emit(min(progress, 99))
+                    progress = 20 + int((current_time / total_duration) * 78)
+                    self.progress_signal.emit(progress)
 
-            # --- 第3步：完成 ---
             self.progress_signal.emit(100)
-            self.status_signal.emit("✅ 搞定啦！请看下方结果 👇")
+            self.status_signal.emit("✅ 转换完成！")
             self.result_signal.emit(full_text)
 
         except Exception as e:
-            self.error_signal.emit(f"发生小意外: {str(e)}")
+            self.error_signal.emit(f"出错: {str(e)}")
 
     def stop(self):
         self.is_running = False
 
 
-# === 主界面 ===
+# === 模型卡片 ===
+class ModelCard(QPushButton):
+    def __init__(self, title, desc, code, color, parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.default_color = color
+        self.setCheckable(True)
+        self.setFixedHeight(100) 
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(8)
+        
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setFont(QFont(UI_FONT, 15, QFont.Weight.Bold))
+        
+        self.lbl_desc = QLabel(desc)
+        self.lbl_desc.setFont(QFont(UI_FONT, 13))
+        self.lbl_desc.setStyleSheet("color: #666;")
+        
+        layout.addWidget(self.lbl_title)
+        layout.addWidget(self.lbl_desc)
+        
+        self.update_style(False)
+
+    def update_style(self, selected):
+        if selected:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {self.default_color}15;
+                    border: 3px solid {self.default_color};
+                    border-radius: 12px;
+                    text-align: left;
+                }}
+            """)
+            self.lbl_title.setStyleSheet(f"color: {self.default_color};")
+        else:
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #f9f9f9;
+                    border: 1px solid #ddd;
+                    border-radius: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover { background-color: white; border-color: #bbb; }
+            """)
+            self.lbl_title.setStyleSheet("color: #333;")
+
+# === 主窗口 ===
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("❤️ 专属语音转文字助手")
-        self.resize(500, 750) # 竖屏设计，像手机APP一样简单
+        self.resize(1100, 700) 
         self.setAcceptDrops(True)
         
         self.video_path = ""
+        self.selected_model = "medium"
         self.worker = None
+        self.model_btns = []
         
+        self.fake_progress_timer = QTimer()
+        self.fake_progress_timer.timeout.connect(self.update_fake_progress)
+
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(20)
-        layout.setContentsMargins(30, 40, 30, 40)
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(40, 40, 40, 40)
+        main_layout.setSpacing(40)
 
-        # 1. 标题
-        title = QLabel("✨ 视频转文字 ✨")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(UI_FONT, 24, QFont.Weight.Bold))
-        title.setStyleSheet("color: #333;")
-        layout.addWidget(title)
+        # =========== 左侧栏 ===========
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(25) 
 
-        # 2. 步骤一：导入区域
-        self.btn_import = QPushButton("\n📂 第一步：点击选择视频文件\n(或者把视频拖到这里)\n")
-        self.btn_import.setFont(QFont(UI_FONT, 11))
-        self.btn_import.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_import.setStyleSheet("""
+        lbl_step1 = QLabel("第一步：上传视频")
+        lbl_step1.setFont(QFont(UI_FONT, 18, QFont.Weight.Bold))
+        left_layout.addWidget(lbl_step1)
+
+        self.import_area = QPushButton("\n📂 点击上传 / 拖拽视频\n(再次点击可替换)\n")
+        self.import_area.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_area.setFixedHeight(140) 
+        self.import_area.setFont(QFont(UI_FONT, 15))
+        self.import_area.setStyleSheet("""
             QPushButton {
                 background-color: #f0f7ff;
-                border: 2px dashed #0078d7;
-                border-radius: 15px;
+                border: 3px dashed #0078d7;
+                border-radius: 20px;
                 color: #0078d7;
-                padding: 20px;
             }
-            QPushButton:hover {
-                background-color: #e0efff;
-            }
+            QPushButton:hover { background-color: #e0efff; }
         """)
-        self.btn_import.clicked.connect(self.select_video)
-        layout.addWidget(self.btn_import)
+        self.import_area.clicked.connect(self.select_video)
+        left_layout.addWidget(self.import_area)
 
-        # 3. 步骤二：状态显示与进度
-        self.status_label = QLabel("等待导入视频...")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setFont(QFont(UI_FONT, 10))
-        self.status_label.setStyleSheet("color: #666; margin-top: 10px;")
-        layout.addWidget(self.status_label)
+        lbl_step2 = QLabel("第二步：选择识别模型")
+        lbl_step2.setFont(QFont(UI_FONT, 18, QFont.Weight.Bold))
+        left_layout.addWidget(lbl_step2)
 
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(8)
-        self.progress.setStyleSheet("""
-            QProgressBar {
-                background-color: #eee;
-                border-radius: 4px;
-            }
-            QProgressBar::chunk {
-                background-color: #FF6B6B; 
-                border-radius: 4px;
-            }
-        """)
-        layout.addWidget(self.progress)
+        model_layout = QGridLayout()
+        model_layout.setSpacing(15)
+        for i, m in enumerate(MODEL_OPTIONS):
+            btn = ModelCard(m["name"], m["desc"], m["code"], m["color"])
+            btn.clicked.connect(lambda checked, b=btn: self.on_model_click(b))
+            model_layout.addWidget(btn, i // 2, i % 2)
+            self.model_btns.append(btn)
+        left_layout.addLayout(model_layout)
+        self.on_model_click(self.model_btns[0])
 
-        # 4. 步骤三：开始按钮
-        self.btn_start = QPushButton("🚀 开始转换")
-        self.btn_start.setFont(QFont(UI_FONT, 14, QFont.Weight.Bold))
-        self.btn_start.setFixedHeight(55)
+        left_layout.addStretch()
+
+        self.lbl_status = QLabel("准备就绪")
+        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_status.setFont(QFont(UI_FONT, 14))
+        self.lbl_status.setStyleSheet("color: #666; font-weight: bold;")
+        left_layout.addWidget(self.lbl_status)
+
+        self.btn_start = ProgressButton("开始转换")
+        self.btn_start.setFixedHeight(60)
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_start.setEnabled(False) # 没选文件不能点
-        # 按钮样式：平时灰色，激活后粉色
-        self.btn_start.setStyleSheet("""
-            QPushButton {
-                background-color: #ccc;
-                color: white;
-                border-radius: 27px;
-                border: none;
-            }
-            QPushButton:enabled {
-                background-color: #FF6B6B; 
-                box-shadow: 0px 4px 10px rgba(255, 107, 107, 0.3);
-            }
-            QPushButton:enabled:hover {
-                background-color: #ff5252;
-            }
-            QPushButton:pressed {
-                background-color: #e04040;
-                margin-top: 2px;
-            }
-        """)
+        self.btn_start.setEnabled(False) 
         self.btn_start.clicked.connect(self.start_process)
-        layout.addWidget(self.btn_start)
+        left_layout.addWidget(self.btn_start)
 
-        # 5. 分割线
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setStyleSheet("color: #eee;")
-        layout.addWidget(line)
+        # =========== 右侧栏 ===========
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(15)
 
-        # 6. 结果区域
-        res_label = QLabel("📝 转换结果 (可以直接修改哦):")
-        res_label.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
-        layout.addWidget(res_label)
+        lbl_res = QLabel("📝 转换结果 (可编辑)")
+        lbl_res.setFont(QFont(UI_FONT, 16, QFont.Weight.Bold))
+        right_layout.addWidget(lbl_res)
 
         self.text_area = QTextEdit()
-        self.text_area.setFont(QFont(UI_FONT, 11))
+        self.text_area.setPlaceholderText("识别的文字会显示在这里...")
+        self.text_area.setFont(QFont(UI_FONT, 20)) 
         self.text_area.setStyleSheet("""
             QTextEdit {
                 border: 1px solid #ddd;
-                border-radius: 10px;
-                padding: 10px;
+                border-radius: 15px;
+                padding: 20px;
                 background-color: #fafafa;
-                selection-background-color: #FF6B6B;
+                selection-background-color: #0078d7;
+                line-height: 160%;
             }
             QTextEdit:focus {
-                border: 1px solid #FF6B6B;
-                background-color: #fff;
+                background-color: white;
+                border-color: #0078d7;
             }
         """)
-        self.text_area.setPlaceholderText("转换后的文字会出现在这里...")
-        layout.addWidget(self.text_area)
+        right_layout.addWidget(self.text_area)
 
-        # 7. 复制按钮
-        self.btn_copy = QPushButton("📋 复制全部内容")
-        self.btn_copy.setFixedHeight(45)
+        self.btn_copy = QPushButton("📋 一键复制全部")
+        self.btn_copy.setFixedHeight(60)
+        self.btn_copy.setFont(QFont(UI_FONT, 16, QFont.Weight.Bold))
         self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setStyleSheet("""
             QPushButton {
-                background-color: #fff;
+                background-color: white;
                 color: #333;
                 border: 1px solid #ddd;
-                border-radius: 10px;
-                font-weight: bold;
+                border-radius: 12px;
             }
-            QPushButton:hover {
-                background-color: #f5f5f5;
-                border-color: #aaa;
-            }
+            QPushButton:hover { background-color: #f5f5f5; border-color: #aaa; }
         """)
         self.btn_copy.clicked.connect(self.copy_text)
-        layout.addWidget(self.btn_copy)
+        right_layout.addWidget(self.btn_copy)
 
-        self.setLayout(layout)
+        main_layout.addWidget(left_widget, 4)
+        main_layout.addWidget(right_widget, 6)
+        
+        self.setLayout(main_layout)
 
-    # --- 逻辑功能 ---
+    # --- 逻辑 ---
+    def on_model_click(self, clicked_btn):
+        for btn in self.model_btns:
+            is_target = (btn == clicked_btn)
+            btn.setChecked(is_target)
+            btn.update_style(is_target)
+        self.selected_model = clicked_btn.code
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.accept()
-        else:
-            e.ignore()
+        if e.mimeData().hasUrls(): e.accept()
+        else: e.ignore()
 
     def dropEvent(self, e):
-        file_path = e.mimeData().urls()[0].toLocalFile()
-        self.load_video(file_path)
+        self.load_video(e.mimeData().urls()[0].toLocalFile())
 
     def select_video(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择视频", "", "视频/音频 (*.mp4 *.mov *.avi *.mp3 *.m4a *.wav)")
-        if f:
-            self.load_video(f)
+        f, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "Media (*.mp4 *.mov *.avi *.mp3 *.m4a *.wav)")
+        if f: self.load_video(f)
 
     def load_video(self, path):
         self.video_path = path
-        # 更新按钮文字，显示文件名
         name = os.path.basename(path)
-        self.btn_import.setText(f"\n📄 已选择：\n{name}\n")
-        self.btn_import.setStyleSheet("""
+        self.import_area.setText(f"\n📄 已就绪：{name}\n(点击可替换)\n")
+        self.import_area.setStyleSheet("""
             QPushButton {
                 background-color: #f0fff4;
-                border: 2px solid #48c774;
-                border-radius: 15px;
-                color: #2f855a;
+                border: 2px solid #2ecc71;
+                border-radius: 20px;
+                color: #27ae60;
+                font-weight: bold;
             }
+            QPushButton:hover { background-color: #dcfce7; }
         """)
-        self.status_label.setText("准备就绪，请点击“开始转换”")
+        self.lbl_status.setText("视频已加载，请点击开始")
         self.btn_start.setEnabled(True)
-        self.progress.setValue(0)
 
     def start_process(self):
         if not self.video_path: return
 
-        # 锁定界面
-        self.btn_start.setEnabled(False)
-        self.btn_import.setEnabled(False)
-        self.btn_start.setText("⏳ 正在处理中...")
+        self.import_area.setEnabled(False)
+        for btn in self.model_btns: btn.setEnabled(False)
         self.text_area.clear()
 
-        # 启动线程
-        # 默认使用 medium 模型，精准且速度适中
-        self.worker = WorkThread(self.video_path, "medium")
-        self.worker.status_signal.connect(self.update_status)
-        self.worker.progress_signal.connect(self.progress.setValue)
+        self.btn_start.start_processing()
+        self.fake_progress_timer.start(100) 
+
+        self.worker = WorkThread(self.video_path, self.selected_model)
+        self.worker.status_signal.connect(self.lbl_status.setText) 
+        self.worker.progress_signal.connect(self.update_real_progress) 
         self.worker.result_signal.connect(self.on_success)
         self.worker.error_signal.connect(self.on_error)
         self.worker.start()
 
-    def update_status(self, msg):
-        self.status_label.setText(msg)
+    def update_fake_progress(self):
+        self.btn_start.increment_fake_progress(0.2)
+
+    def update_real_progress(self, val):
+        self.btn_start.set_progress(val)
 
     def on_success(self, text):
+        self.fake_progress_timer.stop()
+        self.btn_start.set_progress(100)
         self.text_area.setPlainText(text)
-        self.reset_ui_state()
-        QMessageBox.information(self, "成功", "转换完成啦！\n快去看看结果对不对~")
+        self.reset_ui()
+        QMessageBox.information(self, "成功", "转换完成！")
 
     def on_error(self, msg):
-        self.reset_ui_state()
-        self.status_label.setText("❌ 出错啦")
-        QMessageBox.warning(self, "哎呀", msg)
+        self.fake_progress_timer.stop()
+        self.reset_ui()
+        self.lbl_status.setText("❌ 发生错误")
+        QMessageBox.warning(self, "错误", msg)
 
-    def reset_ui_state(self):
-        self.btn_start.setText("🚀 重新开始")
-        self.btn_start.setEnabled(True)
-        self.btn_import.setEnabled(True)
+    def reset_ui(self):
+        self.btn_start.stop_processing()
+        self.import_area.setEnabled(True)
+        for btn in self.model_btns: btn.setEnabled(True)
+        self.lbl_status.setText("准备就绪")
 
     def copy_text(self):
-        content = self.text_area.toPlainText()
-        if not content:
-            self.status_label.setText("⚠️ 还没有内容可以复制哦")
-            return
-        QApplication.clipboard().setText(content)
-        self.btn_copy.setText("✅ 已复制！")
-        QTimer.singleShot(2000, lambda: self.btn_copy.setText("📋 复制全部内容"))
-
+        txt = self.text_area.toPlainText()
+        if txt:
+            QApplication.clipboard().setText(txt)
+            self.btn_copy.setText("✅ 已复制")
+            QTimer.singleShot(1500, lambda: self.btn_copy.setText("📋 一键复制全部"))
+    
+    # 🔥🔥🔥 核心修改：拦截关闭事件，强制杀进程 🔥🔥🔥
+    def closeEvent(self, event):
+        # 1. 如果有定时器在跑，先停掉（虽然 exit 会直接杀，但这是好习惯）
+        if self.fake_progress_timer.isActive():
+            self.fake_progress_timer.stop()
+        
+        # 2. 直接调用 OS 级别的退出
+        # 0 表示正常退出，但这里用 _exit 是为了不等待线程清理
+        # 无论后台在干什么（下载模型、计算矩阵），瞬间全部结束
+        os._exit(0)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
