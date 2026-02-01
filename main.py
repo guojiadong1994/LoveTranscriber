@@ -3,8 +3,28 @@ import os
 import platform
 import time
 
-# 🔥🔥🔥 魔法指令：强制使用国内镜像加速下载 🔥🔥🔥
+# ==============================================================================
+# 🛡️ 防闪退核心补丁 (必须放在最前面)
+# ==============================================================================
+
+# 1. 魔法指令：强制使用国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+# 2. 禁用 TQDM 进度条 (防止底层库打印进度导致无控制台模式崩溃)
+os.environ["TQDM_DISABLE"] = "1"
+
+# 3. "黑洞"类：吃掉所有打印信息
+class NullWriter:
+    def write(self, text): pass
+    def flush(self): pass
+
+# 4. 如果是打包环境，强制接管 stdout/stderr
+# 这样任何库想打印东西，都会被扔进黑洞，不会因为找不到控制台而闪退
+if getattr(sys, 'frozen', False):
+    sys.stdout = NullWriter()
+    sys.stderr = NullWriter()
+
+# ==============================================================================
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
@@ -16,14 +36,12 @@ from PyQt6.QtGui import QFont, QColor, QPalette, QPainter, QBrush, QPen, QPainte
 IS_MAC = (platform.system() == 'Darwin')
 UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
-# 模型预估大小 (MB)，用于计算进度
 MODEL_SPECS = {
     "medium":   {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71", "size": 1500},
     "base":     {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db", "size": 150},
     "large-v3": {"name": "🧠 深度模式", "desc": "超准但稍慢", "code": "large-v3", "color": "#00cec9", "size": 3100},
     "small":    {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c", "size": 500}
 }
-# 转换成列表供界面使用
 MODEL_OPTIONS = list(MODEL_SPECS.values())
 
 # === 自定义：带进度条的按钮 ===
@@ -34,7 +52,7 @@ class ProgressButton(QPushButton):
         self._is_processing = False
         self.default_text = text
         self.processing_text = "转换中 {0}%"
-        self._extra_text = "" # 用于显示下载大小
+        self._extra_text = "" 
         
         self.setStyleSheet("""
             QPushButton {
@@ -113,10 +131,9 @@ class ProgressButton(QPushButton):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
 
 
-# === 新增：下载监视线程 ===
-# 这个线程专门盯着文件夹看，看它变大了没有
+# === 下载监视线程 (加固版) ===
 class DownloadMonitor(QThread):
-    size_signal = pyqtSignal(int, int) # 已下载MB, 总预估MB
+    size_signal = pyqtSignal(int, int)
 
     def __init__(self, target_folder, estimated_size_mb):
         super().__init__()
@@ -127,20 +144,25 @@ class DownloadMonitor(QThread):
     def get_folder_size(self):
         total_size = 0
         try:
+            # 增加 try-except 防止在文件写入瞬间读取导致权限错误
             for dirpath, dirnames, filenames in os.walk(self.target_folder):
                 for f in filenames:
                     fp = os.path.join(dirpath, f)
+                    # 忽略快捷方式和临时锁文件
                     if not os.path.islink(fp):
-                        total_size += os.path.getsize(fp)
-        except:
+                        try:
+                            total_size += os.path.getsize(fp)
+                        except OSError:
+                            continue 
+        except Exception:
             pass
-        return total_size / (1024 * 1024) # 转为 MB
+        return total_size / (1024 * 1024) 
 
     def run(self):
         while self.is_running:
             current_mb = int(self.get_folder_size())
             self.size_signal.emit(current_mb, self.estimated_size_mb)
-            time.sleep(0.5) # 每0.5秒检查一次
+            time.sleep(0.5) 
 
     def stop(self):
         self.is_running = False
@@ -149,7 +171,7 @@ class DownloadMonitor(QThread):
 # === 核心工作线程 ===
 class WorkThread(QThread):
     status_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(int, str) # 进度值, 覆盖文字(可选)
+    progress_signal = pyqtSignal(int, str)
     result_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
 
@@ -161,6 +183,7 @@ class WorkThread(QThread):
         self.monitor = None
 
     def run(self):
+        # 延迟导包
         try:
             from faster_whisper import WhisperModel
         except ImportError:
@@ -178,7 +201,6 @@ class WorkThread(QThread):
                 os.makedirs(model_dir)
 
             # 2. 启动下载监视器
-            # 获取该模型的预估大小
             target_mb = MODEL_SPECS[self.model_code]["size"]
             self.monitor = DownloadMonitor(model_dir, target_mb)
             self.monitor.size_signal.connect(self.on_download_update)
@@ -186,7 +208,8 @@ class WorkThread(QThread):
 
             self.status_signal.emit(f"⏳ 正在下载/加载模型 (约 {target_mb} MB)...")
             
-            # 3. 开始加载 (如果是第一次，这里会阻塞很久)
+            # 3. 开始加载
+            # 注意：这里的 download_root 会触发下载
             model = WhisperModel(
                 self.model_code, 
                 device="cpu", 
@@ -194,12 +217,12 @@ class WorkThread(QThread):
                 download_root=model_dir
             )
             
-            # 加载完成，关闭监视器
+            # 停止监视
             self.monitor.stop()
             self.monitor.wait()
             
             if not self.is_running: return
-            self.progress_signal.emit(20, None) # 恢复默认文字
+            self.progress_signal.emit(20, None) 
 
             # 4. 分析
             self.status_signal.emit("🎧 正在分析语音内容...")
@@ -233,12 +256,9 @@ class WorkThread(QThread):
             self.error_signal.emit(f"出错: {str(e)}")
 
     def on_download_update(self, current_mb, target_mb):
-        # 这是一个回调，当监视器发现文件变大了，就通知这里
-        # 计算一个假的下载进度 (0-20% 之间)
         if target_mb > 0:
-            dl_progress = int((current_mb / target_mb) * 19) # 限制在 20% 以内
+            dl_progress = int((current_mb / target_mb) * 19) 
             if dl_progress > 19: dl_progress = 19
-            
             msg = f"下载中 {current_mb}MB / {target_mb}MB"
             self.progress_signal.emit(dl_progress, msg)
 
@@ -309,7 +329,6 @@ class MainWindow(QWidget):
         self.worker = None
         self.model_btns = []
         
-        # 心跳定时器 (只在识别阶段用)
         self.fake_progress_timer = QTimer()
         self.fake_progress_timer.timeout.connect(self.update_fake_progress)
 
@@ -469,14 +488,11 @@ class MainWindow(QWidget):
         self.text_area.clear()
 
         self.btn_start.start_processing()
-        
-        # ⚠️ 注意：这里我们不立即启动 fake_progress_timer
-        # 因为下载阶段我们有真实的 monitor 在更新进度文字
-        # 等到进入识别阶段 (进度 > 20) 再启动丝滑心跳
+        # 注意：这里不立即启动 fake_progress，由 worker 决定
 
         self.worker = WorkThread(self.video_path, self.selected_model)
         self.worker.status_signal.connect(self.lbl_status.setText) 
-        self.worker.progress_signal.connect(self.update_progress_ui) # 统一处理入口
+        self.worker.progress_signal.connect(self.update_progress_ui) 
         self.worker.result_signal.connect(self.on_success)
         self.worker.error_signal.connect(self.on_error)
         self.worker.start()
@@ -485,11 +501,9 @@ class MainWindow(QWidget):
         self.btn_start.increment_fake_progress(0.2)
 
     def update_progress_ui(self, val, text_override):
-        # 1. 更新进度条数值
         self.btn_start.set_progress(val, text_override)
-        
-        # 2. 如果进度超过 20% (说明下载完了，开始识别了)，启动丝滑心跳
-        if val >= 20 and not self.fake_progress_timer.isActive():
+        # 只有当下载阶段结束 (进度>=20) 且没有文字覆盖(下载信息)时，才启动心跳
+        if val >= 20 and text_override is None and not self.fake_progress_timer.isActive():
             self.fake_progress_timer.start(100)
 
     def on_success(self, text):
@@ -521,6 +535,7 @@ class MainWindow(QWidget):
     def closeEvent(self, event):
         if self.fake_progress_timer.isActive():
             self.fake_progress_timer.stop()
+        # 强制退出，不给任何弹窗机会
         os._exit(0)
 
 if __name__ == "__main__":
