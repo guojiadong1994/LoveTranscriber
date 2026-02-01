@@ -1,4 +1,4 @@
-name: Build LoveTranscriber
+name: Build LoveTranscriber (Folder Mode)
 
 on: [push]
 
@@ -13,11 +13,14 @@ jobs:
       with:
         python-version: '3.10' 
 
+    - name: Check Directory
+      run: ls -R
+
     - name: Install Dependencies
       run: |
-        # 安装 CPU 版 torch，防止显卡驱动导致文件过大
+        # 1. 强制安装 CPU 版 Torch (体积小)
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        # 安装其他依赖
+        # 2. 安装其他依赖
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
@@ -25,25 +28,34 @@ jobs:
         }
         pip install pyinstaller
 
-    - name: Build EXE
+    - name: Build EXE (Folder Mode)
       run: |
-        # 自动定位 main.py 目录
+        # 确定 main.py 位置
         if (Test-Path "main.py") {
-          # 关键修改：添加 --collect-all torch 防止 DLL 丢失
-          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper --collect-all torch -n "LoveTranscriber" main.py
+           $Target = "main.py"
         } elseif (Test-Path "LoveTranscriber/main.py") {
-          cd LoveTranscriber
-          pyinstaller -F -w --clean --noconfirm --collect-all openai_whisper --collect-all torch -n "LoveTranscriber" main.py
+           cd LoveTranscriber
+           $Target = "main.py"
         } else {
-          echo "Error: 找不到 main.py"
-          exit 1
+           echo "Error: 找不到 main.py"
+           exit 1
         }
+
+        # 🚀 核心修改：使用 -D (Onedir) 模式，而非 -F
+        # 增加 --contents-directory "internal" 让根目录整洁一点
+        pyinstaller -D -w --clean --noconfirm `
+          --collect-all openai_whisper `
+          --collect-all torch `
+          --contents-directory "libs" `
+          -n "LoveTranscriber" `
+          $Target
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: LoveTranscriber-EXE
+        name: LoveTranscriber-Folder
+        # 上传生成的整个文件夹
         path: |
-          dist/LoveTranscriber.exe
-          LoveTranscriber/dist/LoveTranscriber.exe
+          dist/LoveTranscriber
+          LoveTranscriber/dist/LoveTranscriber
         overwrite: true
