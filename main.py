@@ -10,33 +10,19 @@ import re
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTextEdit, QMessageBox, QFileDialog, QGridLayout, QFrame,
-    QRadioButton, QButtonGroup
+    QButtonGroup
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath, QIcon
 
 # ==============================================================================
-# 🛡️ 日志配置
+# ✅ 全局配置
 # ==============================================================================
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-LOG_FILE = os.path.join(BASE_DIR, "crash.log")
-
-import faulthandler
-try:
-    log_fs = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
-    sys.stdout = log_fs
-    sys.stderr = log_fs
-    faulthandler.enable(file=log_fs, all_threads=True)
-except:
-    pass
-
-# ==============================================================================
-# ✅ 全局配置
-# ==============================================================================
 IS_MAC = (platform.system() == 'Darwin')
 UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
@@ -47,15 +33,16 @@ MODEL_FILE_MAP = {
     "small": "ggml-small.bin",
 }
 
+# 🔄 顺序调整：推荐 -> 深度 -> 省电 -> 极速
 MODEL_OPTIONS = [
-    {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71"},
-    {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db"},
-    {"name": "🧠 深度模式", "desc": "超准但模型很大", "code": "large-v3", "color": "#00cec9"},
-    {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c"}
+    {"name": "🌟 推荐模式", "desc": "均衡首选", "code": "medium", "color": "#2ecc71"},
+    {"name": "🧠 深度模式", "desc": "最准但慢", "code": "large-v3", "color": "#00cec9"},
+    {"name": "⚡ 省电模式", "desc": "轻量快速", "code": "small", "color": "#1abc9c"},
+    {"name": "🚀 极速模式", "desc": "飞一般的快", "code": "base", "color": "#3498db"}
 ]
 
 # ==============================================================================
-# 🎨 UI 组件
+# 🎨 UI 组件：精致化
 # ==============================================================================
 
 class ProgressButton(QPushButton):
@@ -82,7 +69,7 @@ class ProgressButton(QPushButton):
         """)
 
     def set_progress(self, value):
-        # 增加平滑过渡逻辑，防止倒退
+        # 增加平滑过渡逻辑
         if float(value) > self._progress:
             self._progress = float(value)
             self.update()
@@ -116,12 +103,10 @@ class ProgressButton(QPushButton):
         rect = self.rect()
         rectf = QRectF(rect)
 
-        # 背景
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 25, 25)
 
-        # 进度条
         if self._progress > 0:
             prog_width = max(30, (rect.width() * (self._progress / 100.0)))
             path = QPainterPath()
@@ -131,7 +116,6 @@ class ProgressButton(QPushButton):
             painter.drawRect(0, 0, int(prog_width), int(rect.height()))
             painter.setClipping(False)
 
-        # 文字
         painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
         font = self.font()
         font.setPointSize(16)
@@ -146,7 +130,7 @@ class ModelCard(QPushButton):
         self.code = code
         self.default_color = color
         self.setCheckable(True)
-        self.setFixedHeight(85) # 稍微调低高度，更精致
+        self.setFixedHeight(85)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(15, 8, 15, 8)
@@ -175,8 +159,43 @@ class ModelCard(QPushButton):
                 "QPushButton:hover { border: 1px solid #bbb; background-color: #fcfcfc; }"
             )
 
+class ToggleButton(QPushButton):
+    """胶囊切换按钮（替代单选框）"""
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setFixedHeight(35)
+        self.setFont(QFont(UI_FONT, 10))
+        self.update_style(False)
+
+    def update_style(self, checked):
+        if checked:
+            # 激活状态：蓝色背景，白字
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #0078d7;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 5px 15px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            # 未激活状态：灰色背景，黑字
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0;
+                    color: #555;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 5px 15px;
+                }
+                QPushButton:hover { background-color: #d0d0d0; }
+            """)
+
 # ==============================================================================
-# ✅ 核心逻辑线程 (进度条算法优化)
+# ✅ 核心逻辑线程 (慢速优雅进度条)
 # ==============================================================================
 class TranscribeThread(QThread):
     status_signal = pyqtSignal(str)
@@ -189,6 +208,13 @@ class TranscribeThread(QThread):
         self.media_path = media_path
         self.model_code = model_code
         self.is_running = True
+        self.proc = None 
+
+    def stop(self):
+        self.is_running = False
+        if self.proc:
+            try: self.proc.kill()
+            except: pass
 
     def run(self):
         try:
@@ -197,9 +223,9 @@ class TranscribeThread(QThread):
             model_file = MODEL_FILE_MAP.get(self.model_code, "ggml-base.bin")
             model_path = os.path.join(BASE_DIR, "tools", "whisper", model_file)
 
-            if not os.path.exists(ffmpeg): raise Exception("缺少 tools/ffmpeg/ffmpeg.exe")
-            if not os.path.exists(whisper_cli): raise Exception("缺少 tools/whisper/whisper-cli.exe")
-            if not os.path.exists(model_path): raise Exception(f"缺少模型文件：{model_file}")
+            if not os.path.exists(ffmpeg): raise Exception("缺少 ffmpeg.exe")
+            if not os.path.exists(whisper_cli): raise Exception("缺少 whisper-cli.exe")
+            if not os.path.exists(model_path): raise Exception(f"缺少模型：{model_file}")
 
             startupinfo = None
             if platform.system() == 'Windows':
@@ -208,8 +234,8 @@ class TranscribeThread(QThread):
                 startupinfo.wShowWindow = subprocess.SW_HIDE
 
             # --- 1. 抽取音频 ---
-            self.status_signal.emit("⏳ 正在准备音频...")
-            self.progress_signal.emit(5) # 初始跳动
+            self.status_signal.emit("⏳ 正在提取音频...")
+            self.progress_signal.emit(1) # 从 1% 开始，不突兀
             
             tmp_wav = os.path.join(tempfile.gettempdir(), f"love_{int(time.time())}.wav")
             cmd_ff = [ffmpeg, "-y", "-i", self.media_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", tmp_wav]
@@ -220,18 +246,17 @@ class TranscribeThread(QThread):
                 startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0
             )
 
-            if not os.path.exists(tmp_wav): raise Exception("音频提取失败。")
+            if not os.path.exists(tmp_wav): raise Exception("音频提取失败")
             if not self.is_running: return
 
-            # --- 2. 识别 (丝滑进度条逻辑) ---
-            self.status_signal.emit("🧠 正在努力听写中...")
+            # --- 2. 识别 ---
+            self.status_signal.emit("🧠 正在AI思考中...")
             
             out_prefix = os.path.join(tempfile.gettempdir(), f"love_out_{int(time.time())}")
             out_txt = out_prefix + ".txt"
-
             cmd_wh = [whisper_cli, "-m", model_path, "-f", tmp_wav, "-l", "zh", "-otxt", "-of", out_prefix]
 
-            proc = subprocess.Popen(
+            self.proc = subprocess.Popen(
                 cmd_wh,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 cwd=os.path.dirname(whisper_cli),
@@ -239,31 +264,26 @@ class TranscribeThread(QThread):
                 startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0
             )
 
-            # 🚀 算法优化：渐近式进度条 (Zeno's Paradox)
-            # 让进度条永远在动，但永远不超过 98%，直到真正结束
-            current_prog = 10.0
-            target_prog = 98.0
+            # 🚀 优化后的进度条算法：更慢，更均匀
+            current_prog = 5.0
+            target_prog = 99.0
             
             while True:
-                if proc.poll() is not None: break
-                if not self.is_running: proc.kill(); return
+                if self.proc.poll() is not None: break
+                if not self.is_running: self.proc.kill(); return
                 
-                # 关键算法：每次只走剩下路程的一小部分
-                # 这样越往后走越慢，但一直在动，不会卡死
+                # 每次只走剩余路程的 2% (之前是 5%)，步子迈小一点
                 remaining = target_prog - current_prog
-                step = remaining * 0.05  # 每次走剩余的 5%
-                if step < 0.1: step = 0.1 # 保持最低动量
+                step = remaining * 0.02 
+                if step < 0.05: step = 0.05 # 保持极微小的蠕动
                 
                 current_prog += step
-                if current_prog > 99: current_prog = 99
-                
                 self.progress_signal.emit(int(current_prog))
                 
-                # 读取输出防止缓存堵塞
-                proc.stdout.readline()
-                time.sleep(0.2) # 刷新频率
+                self.proc.stdout.readline()
+                time.sleep(0.1) # 刷新频率快一点，但步长小，视觉更丝滑
 
-            if proc.returncode != 0: raise Exception("识别意外中断")
+            if self.proc.returncode != 0: raise Exception("识别意外中断")
             if not os.path.exists(out_txt): raise Exception("未生成结果")
 
             with open(out_txt, "r", encoding="utf-8", errors="ignore") as f:
@@ -272,27 +292,27 @@ class TranscribeThread(QThread):
             try: os.remove(tmp_wav); os.remove(out_txt)
             except: pass
 
-            self.progress_signal.emit(100) # 最后瞬间拉满
-            self.status_signal.emit("✅ 搞定啦！")
+            self.progress_signal.emit(100)
+            self.status_signal.emit("✅ 转换完成")
             self.result_signal.emit(text)
 
         except Exception as e:
-            traceback.print_exc()
             self.error_signal.emit(str(e))
 
 # ==============================================================================
-# ✅ 主窗口 (完美对齐 + 双模式输出)
+# ✅ 主窗口 (完美布局 + 胶囊切换)
 # ==============================================================================
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("❤️ 专属语音转文字助手 (完美版)")
+        self.setWindowTitle("❤️ 专属语音转文字助手")
         self.resize(1000, 650)
         self.setAcceptDrops(True)
         self.media_path = ""
         self.selected_model = "medium"
-        self.full_raw_text = "" # 存储原始文本
+        self.full_raw_text = ""
         self.model_btns = []
+        self.worker = None 
         self.init_ui()
 
     def init_ui(self):
@@ -300,16 +320,18 @@ class MainWindow(QWidget):
         main_layout.setContentsMargins(25, 25, 25, 25)
         main_layout.setSpacing(25)
 
-        # === 左侧控制区 (40%) ===
+        # === 左侧控制区 ===
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setSpacing(15)
 
+        # 1. 标题
         title = QLabel("步骤 1: 选择配置")
         title.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold))
         title.setStyleSheet("color: #555;")
         left_layout.addWidget(title)
 
+        # 2. 导入按钮
         self.btn_import = QPushButton("\n📂 点击选择 / 拖入视频\n")
         self.btn_import.setFont(QFont(UI_FONT, 14))
         self.btn_import.setFixedHeight(120)
@@ -320,6 +342,10 @@ class MainWindow(QWidget):
         self.btn_import.clicked.connect(self.sel_media)
         left_layout.addWidget(self.btn_import)
 
+        # 🔧 布局核心：这里加一点弹簧，把模型区域稍微往下压
+        left_layout.addStretch(1) 
+
+        # 3. 模型选择 (Grid)
         grid = QGridLayout()
         grid.setSpacing(10)
         for i, m in enumerate(MODEL_OPTIONS):
@@ -330,61 +356,67 @@ class MainWindow(QWidget):
         left_layout.addLayout(grid)
         self.on_model_click(self.model_btns[0])
 
+        # 4. 状态文字
         self.lbl_stat = QLabel("等待任务...")
         self.lbl_stat.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_stat.setStyleSheet("color: #666;")
+        self.lbl_stat.setStyleSheet("color: #666; margin-top: 10px;") # 加点上边距
         left_layout.addWidget(self.lbl_stat)
 
-        # 🔧 布局核心：添加弹簧，把“开始转换”按钮推到底部
-        left_layout.addStretch() 
+        # 🔧 布局核心：这里加更大的弹簧，把开始按钮推到底部
+        left_layout.addStretch(3)
 
+        # 5. 开始按钮
         self.btn_start = ProgressButton("✨ 开始转换")
-        self.btn_start.setFixedHeight(55) # 和右边对齐高度
+        self.btn_start.setFixedHeight(55)
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self.start)
         left_layout.addWidget(self.btn_start)
 
-        # === 右侧结果区 (60%) ===
+        # === 右侧结果区 ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setSpacing(10)
 
-        # 右侧头部布局：标题 + 单选按钮
+        # 头部布局：标题 + 胶囊切换器
         r_head_layout = QHBoxLayout()
         r_title = QLabel("步骤 2: 获取结果")
         r_title.setFont(QFont(UI_FONT, 12, QFont.Weight.Bold))
         r_title.setStyleSheet("color: #555;")
         r_head_layout.addWidget(r_title)
         
-        r_head_layout.addStretch() # 把单选按钮推到右边
+        r_head_layout.addStretch() # 把切换器推到右边
 
-        # ✨ 新增：格式选择
-        self.rb_lines = QRadioButton("📝 分行显示")
-        self.rb_full = QRadioButton("📜 逗号连句")
-        self.rb_lines.setChecked(True) # 默认分行
+        # ✨ 新设计：胶囊切换按钮
+        self.toggle_group = QButtonGroup(self)
+        self.btn_mode_lines = ToggleButton("📝 分行显示")
+        self.btn_mode_full = ToggleButton("📜 逗号连句")
         
-        # 样式美化
-        rb_style = "QRadioButton { font-size: 13px; color: #333; } QRadioButton::indicator { width: 16px; height: 16px; }"
-        self.rb_lines.setStyleSheet(rb_style)
-        self.rb_full.setStyleSheet(rb_style)
+        self.toggle_group.addButton(self.btn_mode_lines)
+        self.toggle_group.addButton(self.btn_mode_full)
         
-        # 绑定事件
-        self.rb_lines.toggled.connect(self.update_text_display)
-        self.rb_full.toggled.connect(self.update_text_display)
+        # 默认选中第一个
+        self.btn_mode_lines.setChecked(True)
+        self.btn_mode_lines.update_style(True)
+        self.btn_mode_full.update_style(False)
         
-        r_head_layout.addWidget(self.rb_lines)
-        r_head_layout.addWidget(self.rb_full)
+        # 绑定点击事件 (样式切换 + 功能切换)
+        self.toggle_group.buttonClicked.connect(self.on_format_change)
+
+        r_head_layout.addWidget(self.btn_mode_lines)
+        r_head_layout.addWidget(self.btn_mode_full)
         
         right_layout.addLayout(r_head_layout)
 
+        # 文本框 (自带滚动条)
         self.txt = QTextEdit()
-        self.txt.setPlaceholderText("转换结果将显示在这里...")
+        self.txt.setPlaceholderText("这里会显示转换结果...\n\n(支持超长文本，右侧会自动出现滚动条)")
         self.txt.setFont(QFont(UI_FONT, 12))
         self.txt.setStyleSheet("border: 1px solid #ddd; border-radius: 10px; padding: 10px; background-color: #fff;")
         right_layout.addWidget(self.txt)
 
+        # 复制按钮
         btn_copy = QPushButton("📋 一键复制结果")
-        btn_copy.setFixedHeight(55) # 高度与左侧“开始转换”一致，实现视觉对齐
+        btn_copy.setFixedHeight(55)
         btn_copy.setFont(QFont(UI_FONT, 12))
         btn_copy.setStyleSheet("""
             QPushButton { background-color: #2ecc71; color: white; border-radius: 25px; border: none; font-weight: bold; }
@@ -403,6 +435,13 @@ class MainWindow(QWidget):
             x.setChecked(x == b)
             x.update_style(x == b)
         self.selected_model = b.code
+
+    def on_format_change(self, btn):
+        # 刷新按钮样式
+        self.btn_mode_lines.update_style(self.btn_mode_lines.isChecked())
+        self.btn_mode_full.update_style(self.btn_mode_full.isChecked())
+        # 刷新文本内容
+        self.update_text_display()
 
     def dragEnterEvent(self, e): e.accept() if e.mimeData().hasUrls() else e.ignore()
     def dropEvent(self, e): 
@@ -424,7 +463,7 @@ class MainWindow(QWidget):
         self.btn_start.start_processing()
         self.btn_import.setEnabled(False)
         self.txt.clear()
-        self.full_raw_text = "" # 清空缓存
+        self.full_raw_text = ""
         
         self.worker = TranscribeThread(self.media_path, self.selected_model)
         self.worker.status_signal.connect(self.lbl_stat.setText)
@@ -434,25 +473,18 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def done(self, text):
-        self.full_raw_text = text # 保存原始文本
-        self.update_text_display() # 根据当前单选按钮状态显示
+        self.full_raw_text = text
+        self.update_text_display()
         self.lbl_stat.setText("🎉 转换成功！")
         self.reset_ui()
 
     def update_text_display(self):
-        """根据用户选择的模式刷新文本框"""
         if not self.full_raw_text: return
-        
-        if self.rb_lines.isChecked():
-            # 模式1: 原汁原味 (保持换行)
+        if self.btn_mode_lines.isChecked():
             self.txt.setPlainText(self.full_raw_text)
         else:
-            # 模式2: 逗号连句 (去除换行，变成长句)
-            # 把换行符替换成中文逗号，并处理可能出现的连续逗号
             clean_text = self.full_raw_text.replace('\n', '，').replace('\r', '')
-            # 简单的清理逻辑，防止出现 ",,"
-            while "，，" in clean_text:
-                clean_text = clean_text.replace("，，", "，")
+            while "，，" in clean_text: clean_text = clean_text.replace("，，", "，")
             self.txt.setPlainText(clean_text)
 
     def fail(self, err):
@@ -469,6 +501,13 @@ class MainWindow(QWidget):
         self.txt.selectAll()
         self.txt.copy()
         self.lbl_stat.setText("已复制！")
+
+    def closeEvent(self, event):
+        """强制杀死后台进程"""
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(200)
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
