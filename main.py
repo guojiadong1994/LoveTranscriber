@@ -4,27 +4,52 @@ import platform
 import shutil
 import traceback
 import time
+import socket
+import ctypes
 
 # ==============================================================================
-# 🛡️ Ultra 9 专属保命补丁 (必须放在所有 import 之前)
+# 🛡️ 0. 确定“大本营”目录 (便携模式)
 # ==============================================================================
 
-# 1. 强制使用 AVX2 指令集 (避开 Ultra 9 的 AVX-VNNI/AMX 潜在 Bug)
-os.environ["MKL_ENABLE_INSTRUCTIONS"] = "AVX2"
+# 你的核心诉求：所有文件都必须在 exe 旁边，不许乱跑
+if getattr(sys, 'frozen', False):
+    # 打包后：exe 所在的目录
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # 开发时：py 文件所在的目录
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 2. 限制单线程启动 (防止 Intel 大小核调度导致死锁崩溃)
-# 等模型加载完，我们在内部再放开，但启动时必须稳！
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
+# 日志和模型都放在这里
+LOG_FILE = os.path.join(BASE_DIR, "crash.log")
+MODELS_ROOT = os.path.join(BASE_DIR, "models")
+
+# ==============================================================================
+# 🛡️ 1. 底层崩溃捕捉 (防闪退黑匣子)
+# ==============================================================================
+import faulthandler
+
+try:
+    # 每次启动清空旧日志，保持清爽
+    log_fs = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
+    # 重定向 Python 的输出到文件 (同时也保留控制台输出)
+    sys.stdout = log_fs
+    sys.stderr = log_fs
+    # 开启 C++ 级别的错误捕捉
+    faulthandler.enable(file=log_fs, all_threads=True)
+    
+    print(f"===== APP START {time.strftime('%Y-%m-%d %H:%M:%S')} =====")
+    print(f"Root Dir: {BASE_DIR}")
+    print(f"Python: {sys.version}")
+except:
+    pass 
+
+# ==============================================================================
+# 🛡️ 2. 核心环境配置
+# ==============================================================================
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-# 3. 强制国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-
-print("***************************************************")
-print("        正在启动 (Ultra 9 兼容模式)               ")
-print("***************************************************")
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
@@ -32,15 +57,19 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QP
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
 
-# 引入 ctypes 用于弹窗
-import ctypes
-
 try:
+    print("Importing faster_whisper...")
     from faster_whisper import WhisperModel
+    print("Importing huggingface_hub...")
     from huggingface_hub import snapshot_download
     HAS_WHISPER = True
-except ImportError:
+    print("✅ Libraries imported successfully")
+except ImportError as e:
+    print(f"❌ Missing libraries: {e}")
     HAS_WHISPER = False
+except Exception as e:
+    print(f"❌ Import error: {e}")
+    traceback.print_exc()
 
 # === 全局配置 ===
 IS_MAC = (platform.system() == 'Darwin')
@@ -77,6 +106,7 @@ class ProgressButton(QPushButton):
             QPushButton:pressed { background-color: #005a9e; }
             QPushButton:disabled { background-color: #cccccc; color: #888; }
         """)
+
     def set_progress(self, value):
         if value > self._progress: self._progress = float(value)
         self.update() 
@@ -86,6 +116,22 @@ class ProgressButton(QPushButton):
     def set_format(self, fmt):
         self.format_str = fmt
         self._custom_text = None
+        self.update()
+    def auto_creep_progress(self):
+        current = self._progress
+        increment = 0.0
+        if current < 39.0:
+            if current < 15.0: increment = 0.5 
+            elif current < 30.0: increment = 0.1 
+            else: increment = 0.01 
+        elif current >= 40.0 and current < 49.0:
+            increment = 0.05
+        elif current >= 50.0 and current < 98.0:
+            increment = 0.1
+        self._progress += increment
+        if current < 40.0 and self._progress >= 39.9: self._progress = 39.9
+        if current < 50.0 and self._progress >= 49.9: self._progress = 49.9
+        if self._progress >= 99.0: self._progress = 99.0
         self.update()
     def start_processing(self):
         self._is_processing = True
@@ -101,17 +147,21 @@ class ProgressButton(QPushButton):
         self.setText(self.default_text)
         self.setEnabled(True)
         self.update()
+    
     def paintEvent(self, event):
         if not self._is_processing:
             super().paintEvent(event)
             return
+        
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
-        rectf = QRectF(rect)
+        rectf = QRectF(rect) 
+
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 30, 30)
+        
         if self._progress > 0:
             prog_width = (rect.width() * (self._progress / 100.0))
             if prog_width < 30: prog_width = 30
@@ -121,6 +171,7 @@ class ProgressButton(QPushButton):
             painter.setBrush(QColor("#0078d7"))
             painter.drawRect(0, 0, int(prog_width), int(rect.height()))
             painter.setClipping(False)
+            
         painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
         font = self.font()
         font.setPointSize(16) 
@@ -129,6 +180,7 @@ class ProgressButton(QPushButton):
         else: display_text = self.format_str.format(int(self._progress))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, display_text)
 
+# === 监控线程 (监控 BASE_DIR/models) ===
 class DownloadMonitor(QThread):
     progress_update = pyqtSignal(int, int, int)
     def __init__(self, target_folder, expected_size_mb):
@@ -155,6 +207,7 @@ class DownloadMonitor(QThread):
             time.sleep(0.5)
     def stop(self): self.is_running = False
 
+# === 核心工作线程 ===
 class WorkThread(QThread):
     status_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int)
@@ -171,64 +224,73 @@ class WorkThread(QThread):
         self.is_running = True
 
     def run(self):
-        print(f"--- 任务启动 ---")
+        print(f"--- TASK START: {self.model_code} ---")
+        if not HAS_WHISPER:
+            self.error_signal.emit("错误：缺少 faster-whisper 库")
+            return
+
         try:
-            if getattr(sys, 'frozen', False):
-                base_dir = os.path.dirname(sys.executable)
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
+            # 1. 确保模型目录存在
+            os.makedirs(MODELS_ROOT, exist_ok=True)
             
-            models_root = os.path.join(base_dir, "models")
-            model_dir = os.path.join(models_root, f"models--{self.repo_id.replace('/', '--')}")
+            # 这里的 model_base_dir 是 huggingface 的缓存结构目录
+            model_base_dir = os.path.join(MODELS_ROOT, f"models--{self.repo_id.replace('/', '--')}")
+            print(f"Model Base Dir: {model_base_dir}")
 
             # --- 阶段 1: 下载 ---
-            self.status_signal.emit(f"⏳ 正在校验模型...")
+            self.status_signal.emit(f"⏳ 正在校验/下载模型...")
             expected_mb = MODEL_EXPECTED_SIZE.get(self.model_code, 1000)
-            self.monitor_signal.emit(True, model_dir, expected_mb)
+            self.monitor_signal.emit(True, model_base_dir, expected_mb)
 
             try:
-                print("Snapshot download check...")
-                snapshot_download(
+                print("Calling snapshot_download...")
+                # 🔥 关键修复：使用 snapshot_download 的返回值作为路径
+                # 这样无论它把文件存在了 cache 的哪个子目录下，我们都能精准拿到
+                real_model_path = snapshot_download(
                     repo_id=self.repo_id,
                     repo_type="model",
-                    local_dir=model_dir,
+                    local_dir=model_base_dir,
                     resume_download=True,
                     max_workers=1
                 )
+                print(f"✅ Real Snapshot Path: {real_model_path}")
             except Exception as dl_err:
                 print(f"Download Error: {dl_err}")
                 self.monitor_signal.emit(False, "", 0)
-                if os.path.exists(model_dir):
-                    self.status_signal.emit("⚠️ 尝试使用本地缓存...")
+                # 容错机制：如果下载报错但本地似乎有文件，尝试使用 base_dir
+                if os.path.exists(model_base_dir) and self.get_size(model_base_dir) > (expected_mb * 0.8):
+                    print("Fallback to local cache...")
+                    self.status_signal.emit("⚠️ 网络微恙，尝试使用本地缓存...")
+                    real_model_path = model_base_dir # 这种情况下只能盲猜了
                 else:
-                    raise Exception(f"网络错误: {str(dl_err)}")
+                    raise Exception(f"下载失败: {str(dl_err)}")
 
             self.monitor_signal.emit(False, "", 0)
             if not self.is_running: return
+            
             self.stage_signal.emit("加载中 {0}%") 
             self.progress_signal.emit(40)
 
-            # --- 阶段 2: 加载 (Crash Zone) ---
+            # --- 阶段 2: 加载 ---
             self.status_signal.emit("🧠 正在唤醒 AI 引擎...")
-            print(f"Loading WhisperModel from {model_dir}")
+            print(f"Init WhisperModel with path: {real_model_path}")
             
             try:
-                # 🔥 终极兼容配置 🔥
-                # 1. 不指定 device (自动)
-                # 2. compute_type="float32" (最稳)
-                # 3. cpu_threads=4 (手动限制线程，防止 Ultra 9 跑满崩溃)
+                # 🔥 兼容配置：
+                # 1. compute_type="float32" (兼容所有CPU，防止 int8 崩溃)
+                # 2. cpu_threads=4 (防止 Ultra 9 线程爆炸)
                 model = WhisperModel(
-                    model_dir, 
+                    real_model_path, 
                     device="cpu", 
                     compute_type="float32",
                     cpu_threads=4, 
                     local_files_only=True 
                 )
                 print("Model Loaded Successfully!")
-            except Exception as e:
-                print(f"CRASH: {e}")
+            except Exception as load_err:
+                print(f"CRASH DURING LOAD: {load_err}")
                 traceback.print_exc()
-                raise e
+                raise Exception(f"模型加载失败，请把 crash.log 发给开发者。\n错误: {str(load_err)}")
 
             if not self.is_running: return
             self.stage_signal.emit("识别中 {0}%")
@@ -253,15 +315,22 @@ class WorkThread(QThread):
                     progress = 50 + int((segment.end / total_duration) * 48)
                     self.progress_signal.emit(progress)
 
+            print("Done.")
             self.progress_signal.emit(100)
             self.status_signal.emit("✅ 转换完成！")
             self.result_signal.emit(full_text)
 
         except Exception as e:
-            print(f"Exception: {e}")
+            print(f"Worker Exception: {e}")
             traceback.print_exc()
             self.monitor_signal.emit(False, "", 0)
             self.error_signal.emit(str(e))
+
+    def get_size(self, folder):
+        t = 0
+        for r, d, f in os.walk(folder):
+            for i in f: t += os.path.getsize(os.path.join(r, i))
+        return t / (1024*1024)
 
     def stop(self): self.is_running = False
 
@@ -291,7 +360,7 @@ class ModelCard(QPushButton):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("❤️ 专属语音转文字助手 (兼容修复版)")
+        self.setWindowTitle("❤️ 专属语音转文字助手 (便携稳定版)")
         self.resize(1100, 700) 
         self.setAcceptDrops(True)
         self.video_path = ""
@@ -305,7 +374,7 @@ class MainWindow(QWidget):
         main_layout = QHBoxLayout()
         left_widget = QWidget(); left_layout = QVBoxLayout(left_widget)
         
-        self.import_area = QPushButton("\n📂 点击上传 / 拖拽视频\n(再次点击可替换)\n")
+        self.import_area = QPushButton("\n📂 点击上传 / 拖拽视频\n(便携模式)\n")
         self.import_area.setFixedHeight(140)
         self.import_area.clicked.connect(self.select_video)
         left_layout.addWidget(self.import_area)
@@ -380,7 +449,9 @@ class MainWindow(QWidget):
     def on_error(self, msg):
         self.reset_ui()
         self.lbl_status.setText("❌ 出错")
-        QMessageBox.warning(self, "错误", f"发生错误: {msg}\n\n请查看黑框框！")
+        # 错误提示指引看 crash.log
+        log_path = os.path.join(BASE_DIR, "crash.log")
+        QMessageBox.warning(self, "错误", f"发生错误: {msg}\n\n详细日志已保存在:\n{log_path}")
     def reset_ui(self):
         self.btn_start.stop_processing()
         self.import_area.setEnabled(True)
@@ -395,5 +466,6 @@ if __name__ == "__main__":
         window.show()
         sys.exit(app.exec())
     except Exception as e:
+        print("\n\n!!! FATAL ERROR !!!")
         traceback.print_exc()
         input("Press Enter...")
