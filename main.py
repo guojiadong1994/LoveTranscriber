@@ -1,37 +1,43 @@
 import sys
 import os
-import ctypes
 
 # ==============================================================================
-# ☢️ 最终修复：DLL 路径注入 (扁平化目录版)
+# ☢️ 最终修复：DLL 路径注入 (适配 _internal 结构)
 # ==============================================================================
+# 1. 防止 OpenMP 冲突 (解决 PyTorch 闪退的核心)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import ctypes
+
 if getattr(sys, 'frozen', False):
-    # 获取程序根目录
+    # 获取程序根目录 (LoveTranscriber.exe 所在位置)
     base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     
-    # 因为我们取消了 libs 文件夹，所有东西都在根目录或者 torch/lib 下
+    # 定义所有可能存放 DLL 的路径
+    # ⚠️ 关键修正：加入了 _internal 目录的搜索
     dll_paths = [
-        base_dir,                                       # 根目录
-        os.path.join(base_dir, 'torch', 'lib'),         # PyTorch 目录
+        base_dir,
+        os.path.join(base_dir, '_internal'),                # PyInstaller 默认依赖目录
+        os.path.join(base_dir, '_internal', 'torch', 'lib'),# Torch 在 _internal 里
+        os.path.join(base_dir, 'torch', 'lib'),             # 兼容备用
     ]
     
-    # 临时目录兼容
+    # 临时目录兼容 (单文件模式)
     if hasattr(sys, '_MEIPASS'):
         dll_paths.append(sys._MEIPASS)
         dll_paths.append(os.path.join(sys._MEIPASS, 'torch', 'lib'))
 
-    # 1. 修改环境变量 PATH
+    # 2. 修改环境变量 PATH
     os.environ['PATH'] = os.pathsep.join(dll_paths) + os.pathsep + os.environ['PATH']
 
-    # 2. Python 3.8+ 专用加载
+    # 3. Python 3.8+ 专用加载
     if hasattr(os, 'add_dll_directory'):
         for p in dll_paths:
             if os.path.exists(p):
                 try: os.add_dll_directory(p)
                 except: pass
 
-    # 3. 暴力预加载关键 DLL (解决 WinError 1114)
-    # 只要这几个文件在，PyTorch 就能活
+    # 4. 暴力预加载关键 DLL
     critical_dlls = ['libiomp5md.dll', 'mkl_core.dll', 'mkl_intel_thread.dll', 'c10.dll']
     for p in dll_paths:
         for dll_name in critical_dlls:
@@ -74,7 +80,7 @@ def setup_ffmpeg_path():
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 只要 ffmpeg 在 bin 文件夹里就行
+    # 只要 ffmpeg 在 bin 文件夹里就行 (和 exe 同级)
     bin_dir = os.path.join(base_dir, "bin")
     ffmpeg_in_bin = os.path.join(bin_dir, FFMPEG_NAME)
     
