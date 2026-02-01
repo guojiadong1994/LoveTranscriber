@@ -1,19 +1,13 @@
+===== START 2026-02-01 22:50:07 =====
+Fix: KMP_AFFINITY=disabled
+Importing faster_whisper...
+✅ Imported
+Snapshot download...
 /opt/anaconda3/envs/vtk/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py:186: UserWarning: The `resume_download` argument is deprecated and ignored in `snapshot_download`. Downloads always resume whenever possible.
   warnings.warn(
- machine='arm64')
-Fix applied: AVX2 Enforced
-Importing faster_whisper...
-Importing huggingface_hub...
-✅ Libraries imported successfully
---- TASK START: base ---
-Model Base Dir: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
-Calling snapshot_download...
-✅ Real Snapshot Path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
-Init WhisperModel with path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
-Model Loaded Successfully!
-Duration: 23.080625
-Seg: 嘿 朋友们 支付宝集务服活动又又又又来了。几幅卡就像拆毛盒每一张都有惊喜,红包拿到手软。
-Seg: 就高来买88元的大了红包,不仅有机会引起红包,还能在游戏中心转幅度玩得越多。
-Seg: 出卡机会越多,让你过年不用再问爸妈要钱,快许支付宝把那些幅卡,红统集气来,让好运来的更猛烈些吧。
+Path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
+Model Loaded!
+Seg: 嘿 朋友们 支付宝集务服活动又又又又来了。几乎卡就像拆毛盒每一张都有惊喜,红帮拿到手软。
+Seg: 就高来买88元的大了红帮,不仅有机会引起红帮,还能在游戏中心转服动玩得越多。
+Seg: 出卡机会越多,让你过年不用再问爸妈要钱,快许支付宝把那些服卡,红统集气来,让好运来的更猛烈些吧。
 Seg: 观看更多精彩内容,点击下方连接。
-Done.
