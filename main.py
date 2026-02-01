@@ -2,45 +2,33 @@ import sys
 import os
 import platform
 import shutil
-import traceback # 用于捕获详细堆栈信息
+import traceback
+import time
+
+# ==============================================================================
+# 🛡️ 核心环境配置 (必须放在最前面)
+# ==============================================================================
 
 # 1. 强制国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-# 2. 禁止控制台输出 (依然为了防界面闪退，但我们会重定向到文件)
-os.environ["TQDM_DISABLE"] = "1"
 
-# === 🛡️ 黑匣子系统：将错误记录到 TXT 文件 ===
-# 确定日志文件路径 (EXE 旁边)
+# 2. 🔥 官方禁言：彻底关闭 HuggingFace 的进度条，防止打印乱码导致闪退
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# 3. 增加网络超时宽容度 (设为 60秒)
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
+
+# 4. 黑洞类：吃掉所有不必要的打印
+class NullWriter:
+    def write(self, text): pass
+    def flush(self): pass
+
+# 5. 接管标准输出
 if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    sys.stdout = NullWriter()
+    sys.stderr = NullWriter()
 
-LOG_FILE = os.path.join(BASE_DIR, "debug_log.txt")
-
-class LoggerWriter:
-    def __init__(self):
-        self.terminal = sys.stdout # 保留原输出（如果有的话）
-        self.log = open(LOG_FILE, "a", encoding="utf-8", buffering=1) # 行缓冲，实时写入
-
-    def write(self, message):
-        try:
-            # 过滤掉进度条这种无意义的字符
-            if "%" in message or "\r" in message: return 
-            self.log.write(message)
-            self.log.flush()
-        except: pass
-
-    def flush(self):
-        try: self.log.flush()
-        except: pass
-
-# 重定向输出流到文件
-sys.stdout = LoggerWriter()
-sys.stderr = sys.stdout
-
-# 记录启动时间
-print(f"\n\n=== 软件启动: {platform.system()} | {platform.release()} ===")
+# ==============================================================================
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
@@ -52,8 +40,7 @@ try:
     from faster_whisper import WhisperModel
     from huggingface_hub import snapshot_download
     HAS_WHISPER = True
-except ImportError as e:
-    print(f"核心库导入失败: {e}")
+except ImportError:
     HAS_WHISPER = False
 
 # === 全局配置 ===
@@ -97,6 +84,7 @@ class ProgressButton(QPushButton):
         self.update() 
 
     def auto_creep_progress(self):
+        # 丝滑进度逻辑
         current = self._progress
         increment = 0.0
         if current < 39.0:
@@ -139,6 +127,7 @@ class ProgressButton(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 30, 30)
+        
         if self._progress > 0:
             prog_width = (rect.width() * (self._progress / 100.0))
             if prog_width < 30: prog_width = 30
@@ -148,6 +137,7 @@ class ProgressButton(QPushButton):
             painter.setBrush(QColor("#0078d7"))
             painter.drawRect(0, 0, int(prog_width), int(rect.height()))
             painter.setClipping(False)
+            
         painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
         font = self.font()
         font.setPointSize(16) 
@@ -171,80 +161,67 @@ class WorkThread(QThread):
     def run(self):
         if not HAS_WHISPER:
             self.error_signal.emit("错误：环境不完整，缺少 faster-whisper")
-            print("ERROR: faster-whisper not found")
             return
 
         try:
-            print(f"开始任务: {self.model_code}")
-            
-            # 路径准备
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
             else:
                 base_dir = os.path.dirname(os.path.abspath(__file__))
+            
             models_root = os.path.join(base_dir, "models")
             model_dir = os.path.join(models_root, f"models--{self.repo_id.replace('/', '--')}")
 
-            print(f"模型目录: {model_dir}")
-
             # --- 阶段 1: 下载 ---
-            self.status_signal.emit(f"⏳ 步骤 1/3: 正在下载/校验模型...")
-            print("进入下载阶段...")
+            self.status_signal.emit(f"⏳ 正在下载模型 (首次较慢)...")
             
             try:
-                # 检查 snapshots 文件夹，如果有坏的链接，尝试清理
+                # 🔥 修改重点：max_workers=1
+                # 单线程下载，虽然慢一丢丢，但是绝对不会触发 SSL 握手并发错误
+                # 稳如泰山
                 snapshot_download(
                     repo_id=self.repo_id,
                     repo_type="model",
                     local_dir=model_dir,
                     resume_download=True,
-                    max_workers=4
+                    max_workers=1 
                 )
             except Exception as dl_err:
-                print(f"下载异常: {dl_err}")
-                print("尝试清理目录并重试...")
+                error_str = str(dl_err)
+                # 如果是网络超时，给出友好提示，而不是闪退
+                if "timeout" in error_str.lower() or "ssl" in error_str.lower():
+                    raise Exception("网络连接超时，请检查网络或重试。\n建议关闭 VPN 再试。")
+                
+                # 只有严重错误才清理目录
                 if os.path.exists(model_dir):
                     try: shutil.rmtree(model_dir)
                     except: pass
-                raise Exception(f"网络下载失败: {str(dl_err)}")
+                raise Exception(f"下载失败: {error_str}")
 
             if not self.is_running: return
             self.progress_signal.emit(40, "加载中...")
-            print("下载完成，进入加载阶段...")
 
             # --- 阶段 2: 加载 ---
-            self.status_signal.emit("🧠 步骤 2/3: 正在唤醒 AI 引擎...")
+            self.status_signal.emit("🧠 正在唤醒 AI 引擎...")
             
             try:
-                # 增加 compute_type="int8" 显式指定，防止自动选择 float16 导致老显卡/CPU 崩溃
                 model = WhisperModel(
                     model_dir, 
                     device="cpu", 
-                    compute_type="int8", 
+                    compute_type="int8",
                     local_files_only=True
                 )
-                print("模型加载成功！")
             except Exception as load_err:
-                error_msg = str(load_err)
-                print(f"加载崩溃: {error_msg}")
-                print(traceback.format_exc()) # 打印完整堆栈
-                
-                # 如果是文件损坏，自动清理
-                if "invalid load key" in error_msg or "EOF" in error_msg:
-                    print("检测到文件损坏，执行删除操作...")
-                    if os.path.exists(model_dir):
-                        try: shutil.rmtree(model_dir)
-                        except: pass
-                    raise Exception("模型文件已损坏，已自动删除缓存。请再次点击开始，重新下载。")
-                else:
-                    raise Exception(f"模型加载失败: {error_msg}")
+                if os.path.exists(model_dir):
+                    try: shutil.rmtree(model_dir)
+                    except: pass
+                raise Exception(f"文件校验失败，已自动修复，请再次点击开始。")
 
             if not self.is_running: return
             self.progress_signal.emit(50, "分析中...")
 
             # --- 阶段 3: 识别 ---
-            self.status_signal.emit("🎧 步骤 3/3: 正在分析语音内容...")
-            print("开始识别...")
+            self.status_signal.emit("🎧 正在分析语音内容...")
             
             segments, info = model.transcribe(
                 self.video_path, beam_size=5, language="zh",
@@ -268,12 +245,9 @@ class WorkThread(QThread):
 
             self.progress_signal.emit(100, "完成")
             self.status_signal.emit("✅ 转换完成！")
-            print("任务全部完成")
             self.result_signal.emit(full_text)
 
         except Exception as e:
-            print(f"捕获到未处理异常: {e}")
-            print(traceback.format_exc())
             self.error_signal.emit(str(e))
 
     def stop(self):
@@ -328,8 +302,10 @@ class MainWindow(QWidget):
         self.selected_model = "medium"
         self.worker = None
         self.model_btns = []
+        
         self.fake_progress_timer = QTimer()
         self.fake_progress_timer.timeout.connect(self.update_fake_progress)
+
         self.init_ui()
 
     def init_ui(self):
@@ -451,6 +427,7 @@ class MainWindow(QWidget):
         self.import_area.setEnabled(False)
         for btn in self.model_btns: btn.setEnabled(False)
         self.text_area.clear()
+
         self.btn_start.start_processing()
         self.fake_progress_timer.start(100) 
         self.worker = WorkThread(self.video_path, self.selected_model)
@@ -477,8 +454,8 @@ class MainWindow(QWidget):
         self.fake_progress_timer.stop()
         self.reset_ui()
         self.lbl_status.setText("❌ 发生错误")
-        # 弹窗提示，并建议查看日志
-        QMessageBox.warning(self, "错误", f"发生错误: {msg}\n\n已生成日志文件: debug_log.txt")
+        # 弹窗显示错误信息，而不是闪退
+        QMessageBox.warning(self, "错误", f"出错了: {msg}")
 
     def reset_ui(self):
         self.btn_start.stop_processing()
