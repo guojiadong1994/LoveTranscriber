@@ -1,13 +1,17 @@
-===== START 2026-02-01 22:50:07 =====
-Fix: KMP_AFFINITY=disabled
-Importing faster_whisper...
-✅ Imported
-Snapshot download...
-/opt/anaconda3/envs/vtk/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py:186: UserWarning: The `resume_download` argument is deprecated and ignored in `snapshot_download`. Downloads always resume whenever possible.
-  warnings.warn(
-Path: /Users/guojiadong/Desktop/其他/baobao/LoveTranscriber/models/models--systran--faster-whisper-base
-Model Loaded!
-Seg: 嘿 朋友们 支付宝集务服活动又又又又来了。几乎卡就像拆毛盒每一张都有惊喜,红帮拿到手软。
-Seg: 就高来买88元的大了红帮,不仅有机会引起红帮,还能在游戏中心转服动玩得越多。
-Seg: 出卡机会越多,让你过年不用再问爸妈要钱,快许支付宝把那些服卡,红统集气来,让好运来的更猛烈些吧。
-Seg: 观看更多精彩内容,点击下方连接。
+===== START 2026-02-01 23:32:42 =====
+Fix: Ultra9 env patch + worker subprocess isolation
+{"type": "status", "text": "⏳ 正在校验/下载模型..."}
+{"type": "download", "mb": 0, "expected": 145}
+{"type": "progress", "value": 5}
+{"type": "stage", "fmt": "运行中 {0}%"}
+{"type": "status", "text": "🧠 正在唤醒 AI 引擎..."}
+{"type": "progress", "value": 40}
+{"type": "status", "text": "🔧 加载模型 compute_type=int8 ..."}
+{"type": "status", "text": "🎧 正在分析..."}
+{"type": "progress", "value": 55}
+{"type": "progress", "value": 68}
+{"type": "progress", "value": 79}
+{"type": "progress", "value": 93}
+{"type": "progress", "value": 98}
+{"type": "progress", "value": 100}
+{"type": "status", "text": "✅ 完成！"}

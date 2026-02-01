@@ -1,44 +1,25 @@
-name: Build LoveTranscriber (Portable Mode)
-
-on: [push]
-
-jobs:
-  build:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-
-    - name: Install Dependencies
+    - name: Deduplicate OpenMP DLLs
+      shell: pwsh
       run: |
-        python -m pip install --upgrade pip
-        if (Test-Path "requirements.txt") { pip install -r requirements.txt } 
-        elseif (Test-Path "LoveTranscriber/requirements.txt") { pip install -r LoveTranscriber/requirements.txt }
-        pip install pyinstaller
+        $dist1 = "dist/LoveTranscriber_Portable"
+        $dist2 = "LoveTranscriber/dist/LoveTranscriber_Portable"
+        $target = $null
+        if (Test-Path $dist1) { $target = $dist1 }
+        elseif (Test-Path $dist2) { $target = $dist2 }
+        else { echo "No dist folder found"; exit 0 }
 
-    - name: Build EXE (Portable with DLLs)
-      run: |
-        if (Test-Path "main.py") { $Target = "main.py" } 
-        elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
-        else { echo "Error: Missing main.py"; exit 1 }
+        echo "Target dist: $target"
 
-        # 重点：强制收集 ctranslate2 和 huggingface_hub，这是防止闪退的关键
-        pyinstaller -D -c --clean --noconfirm `
-          --collect-all faster_whisper `
-          --collect-all ctranslate2 `
-          --collect-all huggingface_hub `
-          -n "LoveTranscriber_Portable" `
-          $Target
+        # 找出所有 libiomp5md.dll
+        $dlls = Get-ChildItem -Path $target -Recurse -Filter "libiomp5md.dll" -ErrorAction SilentlyContinue
+        echo "Found libiomp5md.dll count: $($dlls.Count)"
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: LoveTranscriber-Portable
-        path: |
-          dist/LoveTranscriber_Portable
-          LoveTranscriber/dist/LoveTranscriber_Portable
-        overwrite: true
+        if ($dlls.Count -gt 1) {
+          # 保留第一个，删除其余
+          $keep = $dlls[0].FullName
+          echo "Keep: $keep"
+          $dlls | Select-Object -Skip 1 | ForEach-Object {
+            echo "Remove: $($_.FullName)"
+            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+          }
+        }
