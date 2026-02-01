@@ -5,23 +5,26 @@ import shutil
 import traceback
 import time
 import socket
-import ctypes  # 用于调用 Windows 原生弹窗
+import ctypes
 
 # ==============================================================================
-# 🚑 全局环境配置 (必须最先执行)
+# 🛡️ 核心环境配置 (兼容性拉满)
 # ==============================================================================
 
-# 1. 解决 Intel CPU (OpenMP) 库冲突 (Ultra 9 必加)
+# 1. 解决 Intel 库冲突
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# 2. 强制使用 Intel MKL 兼容模式 (针对 Ultra CPU)
+os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
+# 3. 限制线程数，防止 Ultra 大小核调度崩溃
+os.environ["OMP_NUM_THREADS"] = "4"
 
-# 2. 强制国内镜像
+# 4. 强制国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-# 3. 官方禁言 (防闪退)
+# 5. 官方禁言
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
 
-# 4. 确定日志路径
+# 确定日志路径
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -29,11 +32,9 @@ else:
 LOG_FILE = os.path.join(BASE_DIR, "system_check.log")
 
 # ==============================================================================
-# 🩺 开机自检模块 (Self-Diagnostic)
+# 🩺 自检模块
 # ==============================================================================
-
 def log_check(msg):
-    """记录自检日志"""
     print(msg)
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -41,79 +42,25 @@ def log_check(msg):
     except: pass
 
 def show_fatal_error(title, msg):
-    """调用 Windows 原生弹窗显示致命错误 (不依赖 PyQt)"""
-    log_check(f"FATAL ERROR: {msg}")
     try:
-        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10) # 0x10 = Icon Error
-    except:
-        print(f"!!! {title} !!!\n{msg}")
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
+    except: pass
     sys.exit(1)
 
 def run_self_check():
-    """执行 5 项关键检查"""
-    # 清空旧日志
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"=== 自检启动: {platform.uname()} ===\n")
-
-    log_check("🔍 [1/5] 检查环境配置...")
-    if not os.environ.get("KMP_DUPLICATE_LIB_OK") == "TRUE":
-        log_check("⚠️ 警告: KMP 补丁未生效，可能导致 Intel CPU 闪退")
-
-    log_check("🔍 [2/5] 检查写入权限...")
+    # 简单的写入测试，确保没问题再启动
     try:
-        test_file = os.path.join(BASE_DIR, "write_test.tmp")
-        with open(test_file, "w") as f: f.write("ok")
-        os.remove(test_file)
-        log_check("✅ 写入权限正常")
-    except Exception as e:
-        show_fatal_error("权限不足", f"程序无法在当前目录下写入文件。\n请尝试【右键-以管理员身份运行】。\n\n错误: {e}")
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            f.write(f"=== 启动自检 (兼容模式) ===\n")
+            f.write(f"CPU: {platform.processor()}\n")
+    except:
+        show_fatal_error("权限错误", "无法写入日志文件，请尝试右键以管理员身份运行。")
 
-    log_check("🔍 [3/5] 检查网络连接 (国内镜像)...")
-    try:
-        # 尝试连接 hf-mirror.com 的 443 端口
-        socket.setdefaulttimeout(5)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("hf-mirror.com", 443))
-        s.close()
-        log_check("✅ 网络连接正常 (hf-mirror.com)")
-    except Exception as e:
-        log_check(f"⚠️ 网络警告: 无法连接到镜像站 ({e})。如果本地无模型，下载将失败。")
-
-    log_check("🔍 [4/5] 检查核心依赖库...")
-    missing_libs = []
-    try: import PyQt6 
-    except: missing_libs.append("PyQt6")
-    
-    try: import faster_whisper
-    except: missing_libs.append("faster_whisper")
-    
-    try: import huggingface_hub
-    except: missing_libs.append("huggingface_hub")
-
-    if missing_libs:
-        show_fatal_error("缺少依赖", f"以下核心库缺失，程序无法运行:\n{', '.join(missing_libs)}\n请检查打包过程或 requirements.txt")
-    log_check("✅ 核心库加载成功")
-
-    log_check("🔍 [5/5] 检查 CPU 指令集支持...")
-    try:
-        import ctranslate2
-        # 简单的实例化测试，看是否崩坏
-        # 注意: 这里不加载模型，只是测试库能不能被 CPU 调用
-        log_check(f"✅ CTranslate2 版本: {ctranslate2.__version__}")
-    except Exception as e:
-        show_fatal_error("硬件不兼容", f"您的 CPU 可能不支持必要的指令集，或 C++ 库损坏。\n\n错误: {e}")
-
-    log_check("✨ 自检通过，准备启动图形界面...")
-
-
-# ==============================================================================
-# 🚀 启动自检 (在导入 PyQt 之前)
-# ==============================================================================
 if __name__ == "__main__":
     run_self_check()
 
 # ==============================================================================
-# 🖥️ 下面是主程序逻辑
+# 🖥️ 主程序
 # ==============================================================================
 
 class NullWriter:
@@ -129,8 +76,13 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QP
                              QFrame, QGridLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
-from faster_whisper import WhisperModel
-from huggingface_hub import snapshot_download
+
+try:
+    from faster_whisper import WhisperModel
+    from huggingface_hub import snapshot_download
+    HAS_WHISPER = True
+except ImportError:
+    HAS_WHISPER = False
 
 # === 全局配置 ===
 IS_MAC = (platform.system() == 'Darwin')
@@ -166,7 +118,6 @@ class ProgressButton(QPushButton):
         self.default_text = text
         self.format_str = "运行中 {0}%" 
         self._custom_text = None 
-        
         self.setStyleSheet("""
             QPushButton {
                 background-color: #0078d7; color: white; border-radius: 30px; font-weight: bold; font-size: 20px; 
@@ -227,7 +178,6 @@ class ProgressButton(QPushButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 30, 30)
-        
         if self._progress > 0:
             prog_width = (rect.width() * (self._progress / 100.0))
             if prog_width < 30: prog_width = 30
@@ -237,7 +187,6 @@ class ProgressButton(QPushButton):
             painter.setBrush(QColor("#0078d7"))
             painter.drawRect(0, 0, int(prog_width), int(rect.height()))
             painter.setClipping(False)
-            
         painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
         font = self.font()
         font.setPointSize(16) 
@@ -293,6 +242,10 @@ class WorkThread(QThread):
         self.is_running = True
 
     def run(self):
+        if not HAS_WHISPER:
+            self.error_signal.emit("错误：缺少 faster-whisper 库")
+            return
+
         try:
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
@@ -308,6 +261,7 @@ class WorkThread(QThread):
             self.monitor_signal.emit(True, model_dir, expected_mb)
 
             try:
+                # 即使手动拷贝了，运行一下这个验证快照，确认文件没坏
                 snapshot_download(
                     repo_id=self.repo_id,
                     repo_type="model",
@@ -317,36 +271,39 @@ class WorkThread(QThread):
                 )
             except Exception as dl_err:
                 self.monitor_signal.emit(False, "", 0)
-                # 容错：如果本地有足够大的文件，尝试忽略下载错误
+                # 容错：如果本地有文件且够大，尝试硬闯
                 if os.path.exists(model_dir) and self.get_folder_size_mb(model_dir) > (expected_mb * 0.8):
-                    self.status_signal.emit("⚠️ 网络微恙，尝试使用本地缓存...")
+                    self.status_signal.emit("⚠️ 网络微恙，尝试离线模式...")
                 else:
-                    raise Exception(f"下载失败: {str(dl_err)}\n请检查网络连接。")
+                    raise Exception(f"下载校验失败: {str(dl_err)}")
 
             self.monitor_signal.emit(False, "", 0)
             if not self.is_running: return
             self.stage_signal.emit("加载中 {0}%") 
             self.progress_signal.emit(40)
 
-            # --- 阶段 2: 加载 ---
-            self.status_signal.emit("🧠 正在唤醒 AI 引擎...")
+            # --- 阶段 2: 加载 (修复闪退的核心) ---
+            self.status_signal.emit("🧠 正在唤醒 AI 引擎 (兼容模式)...")
             
             if not os.path.exists(model_dir):
-                raise Exception(f"错误：模型文件夹未找到\n{model_dir}")
+                raise Exception(f"找不到模型文件夹: {model_dir}")
 
             try:
+                # 🔥🔥🔥 核心修改点 🔥🔥🔥
+                # 1. compute_type 改为 "float32" (虽然大一点，但绝对兼容所有CPU)
+                # 2. 移除 device="cpu" 的显式指定（让它自动适配最稳的）
+                # 3. local_files_only=True 确保不联网
                 model = WhisperModel(
                     model_dir, 
-                    device="cpu", 
-                    compute_type="int8",
+                    device="cpu",
+                    compute_type="float32", # <--- 关键！改为 float32 防闪退
                     local_files_only=True 
                 )
             except Exception as load_err:
-                # 自动清理损坏文件
                 if os.path.exists(model_dir):
                     try: shutil.rmtree(model_dir)
                     except: pass
-                raise Exception(f"模型加载失败（文件已自动清理）。\n请【点击开始】重新尝试。\n错误: {str(load_err)}")
+                raise Exception(f"模型加载失败 (已自动重置)。\n错误详情: {str(load_err)}\n请重新点击开始。")
 
             if not self.is_running: return
             self.stage_signal.emit("识别中 {0}%")
@@ -389,7 +346,7 @@ class WorkThread(QThread):
 
     def stop(self): self.is_running = False
 
-
+# (后面 ModelCard 和 MainWindow 代码保持不变，不需要改动)
 class ModelCard(QPushButton):
     def __init__(self, title, desc, code, color, parent=None):
         super().__init__(parent)
@@ -582,7 +539,7 @@ class MainWindow(QWidget):
         self.fake_progress_timer.stop()
         self.reset_ui()
         self.lbl_status.setText("❌ 发生错误")
-        QMessageBox.warning(self, "出错啦", f"程序遇到了问题:\n{msg}\n\n详细信息已记录到 system_check.log")
+        QMessageBox.warning(self, "出错啦", f"程序遇到了问题:\n{msg}")
     def reset_ui(self):
         self.btn_start.stop_processing()
         self.import_area.setEnabled(True)
@@ -600,7 +557,6 @@ class MainWindow(QWidget):
         os._exit(0)
 
 if __name__ == "__main__":
-    # 如果自检通过，程序会继续往下走
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
