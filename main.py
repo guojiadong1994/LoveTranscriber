@@ -1,281 +1,335 @@
 import sys
 import os
-
-# ==============================================================================
-# 🚀 极简修复：只设置环境变量，依赖文件靠打包脚本搬运
-# ==============================================================================
-# 1. 允许 OpenMP 重复加载 (防止冲突闪退)
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-# 2. 只有在打包环境下才执行的路径注入 (作为最后一道保险)
-if getattr(sys, 'frozen', False):
-    base_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    # 将程序根目录加入 DLL 搜索路径 (Python 3.8+ 必须)
-    if hasattr(os, 'add_dll_directory'):
-        try: os.add_dll_directory(base_dir)
-        except: pass
-    os.environ['PATH'] = base_dir + os.pathsep + os.environ['PATH']
-
-# ==============================================================================
-
-import shutil
 import time
-import gc
-import requests
 import platform
-# 延迟导入，防止环境未配置好就崩溃
+import threading
+
+# 界面库
+from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                             QLabel, QComboBox, QTextEdit, QProgressBar,
+                             QGroupBox, QMessageBox, QFileDialog, QSplitter, QFrame)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QIcon, QAction
+
+# 核心库：Faster Whisper (延迟加载，防止启动卡顿)
 try:
-    from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                                 QLabel, QComboBox, QTextEdit, QProgressBar,
-                                 QGroupBox, QMessageBox, QFileDialog, QSplitter)
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-    from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
-    import whisper
-    import torch
-except ImportError as e:
-    # 如果导入失败，弹窗提示 (防止直接闪退看不到报错)
-    # 注意：这里只能用 ctypes 弹窗，因为 PyQt 可能还没加载
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(0, f"启动错误: {str(e)}\n请确保 libiomp5md.dll 在程序根目录！", "错误", 16)
-    sys.exit(1)
+    from faster_whisper import WhisperModel
+    HAS_WHISPER = True
+except ImportError:
+    HAS_WHISPER = False
 
 # === 全局配置 ===
-SYSTEM_NAME = platform.system()
-IS_MAC = (SYSTEM_NAME == 'Darwin')
-UI_FONT_NAME = "PingFang SC" if IS_MAC else "Microsoft YaHei"
-FFMPEG_NAME = "ffmpeg" if IS_MAC else "ffmpeg.exe"
+IS_MAC = (platform.system() == 'Darwin')
+UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
-MODEL_URLS = {
-    "medium (推荐:精准)": "https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d594138306422b072347d8d909844695d6c5269446f6e469d8/medium.pt",
-    "large-v3 (最强:超准)": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c12a951d76f2d12bb234ce3d4160950aed193bbb5427cb9f9d2335/large-v3.pt",
-    "base (极速:仅测试)": "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt",
-    "small (平衡)": "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba4920f77e8deaf87c2546c7d42bca2926851ab63d8dd51895b/small.pt"
-}
-MODEL_NAMES = {"medium (推荐:精准)": "medium", "large-v3 (最强:超准)": "large-v3", "base (极速:仅测试)": "base", "small (平衡)": "small"}
+# === 核心工作线程 (加载+识别一体化) ===
+class WorkThread(QThread):
+    status_signal = pyqtSignal(str)   # 更新状态文字
+    progress_signal = pyqtSignal(int) # 更新进度条 (0-100)
+    result_signal = pyqtSignal(str)   # 返回结果
+    error_signal = pyqtSignal(str)    # 报错
 
-# === FFmpeg 配置 ===
-def setup_ffmpeg_path():
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 1. 优先找同级 bin 目录
-    bin_dir = os.path.join(base_dir, "bin")
-    ffmpeg_in_bin = os.path.join(bin_dir, FFMPEG_NAME)
-    if os.path.exists(ffmpeg_in_bin):
-        os.environ["PATH"] += os.pathsep + bin_dir
-        return True, "✅ 内置引擎就绪"
-    
-    # 2. 找系统路径
-    if shutil.which("ffmpeg"):
-        return True, "✅ 系统引擎就绪"
-        
-    return False, f"❌ 缺失组件: 请确保 {FFMPEG_NAME} 在 bin 文件夹内"
-
-HAS_FFMPEG, FFMPEG_MSG = setup_ffmpeg_path()
-
-# === 线程与界面逻辑 (保持不变) ===
-class ModelLoaderWorker(QThread):
-    progress_signal = pyqtSignal(int, str)
-    finished_signal = pyqtSignal(object)
-    error_signal = pyqtSignal(str)
-    def __init__(self, model_key):
+    def __init__(self, video_path, model_size):
         super().__init__()
-        self.model_key = model_key
-        self.model_name = MODEL_NAMES[model_key]
-        self.download_url = MODEL_URLS[model_key]
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.download_root = os.path.join(base_dir, "models")
-    def run(self):
-        if not HAS_FFMPEG:
-            self.error_signal.emit(f"无法启动：找不到 {FFMPEG_NAME}")
-            return
-        if not os.path.exists(self.download_root):
-            os.makedirs(self.download_root, exist_ok=True)
-        target_file = os.path.join(self.download_root, f"{self.model_name}.pt")
-        if not os.path.exists(target_file):
-            self.progress_signal.emit(0, f"正在下载 {self.model_name}...")
-            try:
-                response = requests.get(self.download_url, stream=True, timeout=30)
-                response.raise_for_status()
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded = 0
-                with open(target_file, 'wb') as f:
-                    last_emit_time = 0
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if time.time() - last_emit_time > 0.1:
-                                pct = int((downloaded / total_size) * 100) if total_size > 0 else 0
-                                self.progress_signal.emit(pct, f"⬇️ 下载中... {pct}%")
-                                last_emit_time = time.time()
-                self.progress_signal.emit(100, "校验文件...")
-            except Exception as e:
-                if os.path.exists(target_file): os.remove(target_file)
-                self.error_signal.emit(f"下载失败: {str(e)}")
-                return
-        try:
-            self.progress_signal.emit(100, "🧠 正在载入 AI 引擎...")
-            model = whisper.load_model(self.model_name, download_root=self.download_root)
-            self.finished_signal.emit(model)
-        except Exception as e:
-            self.error_signal.emit(f"加载崩溃: {str(e)}")
-
-class TranscribeWorker(QThread):
-    finished_signal = pyqtSignal(str)
-    log_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
-    def __init__(self, model, video_path):
-        super().__init__()
-        self.model = model
         self.video_path = video_path
+        self.model_size = model_size
         self.is_running = True
-    def run(self):
-        self.log_signal.emit(f"🎬 读取: {os.path.basename(self.video_path)}")
-        self.log_signal.emit("🚀 开始分析语音 (Medium 模型较慢，请耐心)...")
-        try:
-            result = self.model.transcribe(self.video_path, verbose=False, language='Chinese', initial_prompt="这是一段清晰的普通话视频，请准确识别内容并加上标点符号。")
-            if not self.is_running: return 
-            self.finished_signal.emit(result['text'].strip())
-            self.log_signal.emit("✅ 识别成功！")
-        except Exception as e:
-            self.error_signal.emit(f"识别出错: {str(e)}")
-    def stop(self): self.is_running = False
 
-class TranscriberWindow(QWidget):
+    def run(self):
+        if not HAS_WHISPER:
+            self.error_signal.emit("错误：未检测到 faster-whisper 库！")
+            return
+
+        try:
+            # --- 第1步：加载模型 ---
+            self.status_signal.emit("⏳ 第1步：正在唤醒 AI 大脑 (加载模型)...")
+            self.progress_signal.emit(10)
+            
+            # 获取程序运行目录
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            model_dir = os.path.join(base_dir, "models")
+            
+            # 加载模型 (自动下载/读取)
+            model = WhisperModel(
+                self.model_size, 
+                device="cpu", 
+                compute_type="int8", 
+                download_root=model_dir
+            )
+            
+            if not self.is_running: return
+            self.progress_signal.emit(30)
+
+            # --- 第2步：开始识别 ---
+            self.status_signal.emit(f"🎧 第2步：正在认真听写中...\n({os.path.basename(self.video_path)})")
+            
+            segments, info = model.transcribe(
+                self.video_path, 
+                beam_size=5, 
+                language="zh",
+                initial_prompt="这是一段清晰的普通话，请加标点符号。"
+            )
+
+            full_text = ""
+            # 这是一个估算进度的简易方法
+            total_duration = info.duration
+            current_time = 0
+
+            for segment in segments:
+                if not self.is_running: return
+                full_text += segment.text
+                current_time = segment.end
+                
+                # 计算进度 30% -> 95%
+                if total_duration > 0:
+                    progress = 30 + int((current_time / total_duration) * 65)
+                    self.progress_signal.emit(min(progress, 99))
+
+            # --- 第3步：完成 ---
+            self.progress_signal.emit(100)
+            self.status_signal.emit("✅ 搞定啦！请看下方结果 👇")
+            self.result_signal.emit(full_text)
+
+        except Exception as e:
+            self.error_signal.emit(f"发生小意外: {str(e)}")
+
+    def stop(self):
+        self.is_running = False
+
+
+# === 主界面 ===
+class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("语音转文字助手 (专属版)")
-        self.resize(1000, 700)
+        self.setWindowTitle("❤️ 专属语音转文字助手")
+        self.resize(500, 750) # 竖屏设计，像手机APP一样简单
         self.setAcceptDrops(True)
-        self.model = None
-        self.current_video_path = ""
-        self.loader_worker = None
-        self.trans_worker = None
-        self.init_ui()
-        self.combo_model.setCurrentIndex(0) 
-        self.start_load_model()
-    def init_ui(self):
-        main_layout = QHBoxLayout()
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        left_layout = QVBoxLayout()
-        title = QLabel("🎥 视频转文字神器")
-        title.setFont(QFont(UI_FONT_NAME, 20, QFont.Weight.Bold))
-        left_layout.addWidget(title)
-        self.lbl_env = QLabel(FFMPEG_MSG)
-        self.lbl_env.setStyleSheet("color: green; font-weight: bold;" if HAS_FFMPEG else "color: red; background: #ffe6e6;")
-        left_layout.addWidget(self.lbl_env)
         
-        grp_model = QGroupBox("⚙️ 引擎设置")
-        l_model = QVBoxLayout()
-        self.combo_model = QComboBox()
-        self.combo_model.addItems(list(MODEL_URLS.keys()))
-        self.combo_model.currentIndexChanged.connect(self.on_model_changed)
-        l_model.addWidget(self.combo_model)
-        self.dl_progress = QProgressBar()
-        l_model.addWidget(self.dl_progress)
-        grp_model.setLayout(l_model)
-        left_layout.addWidget(grp_model)
+        self.video_path = ""
+        self.worker = None
+        
+        self.init_ui()
 
-        self.grp_file = QGroupBox("1. 导入视频")
-        l_file = QVBoxLayout()
-        self.btn_select = QPushButton("📂 点击选择视频")
-        self.btn_select.setFixedHeight(60)
-        self.btn_select.clicked.connect(self.select_video)
-        self.lbl_path = QLabel("等待导入...")
-        l_file.addWidget(self.btn_select)
-        l_file.addWidget(self.lbl_path)
-        self.grp_file.setLayout(l_file)
-        left_layout.addWidget(self.grp_file)
+    def init_ui(self):
+        layout = QVBoxLayout()
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 40, 30, 40)
 
-        self.btn_run = QPushButton("✨ 开始识别")
-        self.btn_run.setFixedHeight(60)
-        self.btn_run.setEnabled(False) 
-        self.btn_run.clicked.connect(self.start_transcribe)
-        left_layout.addWidget(self.btn_run)
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
-        left_layout.addWidget(self.log_area)
+        # 1. 标题
+        title = QLabel("✨ 视频转文字 ✨")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setFont(QFont(UI_FONT, 24, QFont.Weight.Bold))
+        title.setStyleSheet("color: #333;")
+        layout.addWidget(title)
 
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("📝 识别结果:"))
-        self.result_area = QTextEdit()
-        self.result_area.setFont(QFont(UI_FONT_NAME, 13))
-        right_layout.addWidget(self.result_area)
-        self.btn_copy = QPushButton("📋 一键复制")
-        self.btn_copy.setFixedHeight(50)
-        self.btn_copy.clicked.connect(self.copy_result)
-        right_layout.addWidget(self.btn_copy)
+        # 2. 步骤一：导入区域
+        self.btn_import = QPushButton("\n📂 第一步：点击选择视频文件\n(或者把视频拖到这里)\n")
+        self.btn_import.setFont(QFont(UI_FONT, 11))
+        self.btn_import.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_import.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f7ff;
+                border: 2px dashed #0078d7;
+                border-radius: 15px;
+                color: #0078d7;
+                padding: 20px;
+            }
+            QPushButton:hover {
+                background-color: #e0efff;
+            }
+        """)
+        self.btn_import.clicked.connect(self.select_video)
+        layout.addWidget(self.btn_import)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        left_widget = QWidget()
-        left_widget.setLayout(left_layout)
-        right_widget = QWidget()
-        right_widget.setLayout(right_layout)
-        splitter.addWidget(left_widget)
-        splitter.addWidget(right_widget)
-        main_layout.addWidget(splitter)
-        self.setLayout(main_layout)
+        # 3. 步骤二：状态显示与进度
+        self.status_label = QLabel("等待导入视频...")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setFont(QFont(UI_FONT, 10))
+        self.status_label.setStyleSheet("color: #666; margin-top: 10px;")
+        layout.addWidget(self.status_label)
 
-    def on_model_changed(self):
-        self.btn_run.setEnabled(False)
-        self.start_load_model()
-    def start_load_model(self):
-        if self.loader_worker: self.loader_worker.terminate()
-        self.loader_worker = ModelLoaderWorker(self.combo_model.currentText())
-        self.loader_worker.progress_signal.connect(lambda v, m: (self.dl_progress.setValue(v), self.dl_progress.setFormat(m)))
-        self.loader_worker.finished_signal.connect(self.on_model_loaded)
-        self.loader_worker.error_signal.connect(lambda m: QMessageBox.critical(self, "错误", m))
-        self.loader_worker.start()
-    def on_model_loaded(self, model):
-        self.model = model
-        self.dl_progress.setValue(100)
-        self.log("模型加载成功！")
-        self.check_ready_state()
-    def check_ready_state(self):
-        if self.model and self.current_video_path and os.path.exists(self.current_video_path):
-            self.btn_run.setEnabled(True)
-    def dragEnterEvent(self, e): e.accept() if e.mimeData().hasUrls() else e.ignore()
-    def dropEvent(self, e): self.set_video(e.mimeData().urls()[0].toLocalFile())
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(8)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #eee;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: #FF6B6B; 
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress)
+
+        # 4. 步骤三：开始按钮
+        self.btn_start = QPushButton("🚀 开始转换")
+        self.btn_start.setFont(QFont(UI_FONT, 14, QFont.Weight.Bold))
+        self.btn_start.setFixedHeight(55)
+        self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start.setEnabled(False) # 没选文件不能点
+        # 按钮样式：平时灰色，激活后粉色
+        self.btn_start.setStyleSheet("""
+            QPushButton {
+                background-color: #ccc;
+                color: white;
+                border-radius: 27px;
+                border: none;
+            }
+            QPushButton:enabled {
+                background-color: #FF6B6B; 
+                box-shadow: 0px 4px 10px rgba(255, 107, 107, 0.3);
+            }
+            QPushButton:enabled:hover {
+                background-color: #ff5252;
+            }
+            QPushButton:pressed {
+                background-color: #e04040;
+                margin-top: 2px;
+            }
+        """)
+        self.btn_start.clicked.connect(self.start_process)
+        layout.addWidget(self.btn_start)
+
+        # 5. 分割线
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setStyleSheet("color: #eee;")
+        layout.addWidget(line)
+
+        # 6. 结果区域
+        res_label = QLabel("📝 转换结果 (可以直接修改哦):")
+        res_label.setFont(QFont(UI_FONT, 10, QFont.Weight.Bold))
+        layout.addWidget(res_label)
+
+        self.text_area = QTextEdit()
+        self.text_area.setFont(QFont(UI_FONT, 11))
+        self.text_area.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                padding: 10px;
+                background-color: #fafafa;
+                selection-background-color: #FF6B6B;
+            }
+            QTextEdit:focus {
+                border: 1px solid #FF6B6B;
+                background-color: #fff;
+            }
+        """)
+        self.text_area.setPlaceholderText("转换后的文字会出现在这里...")
+        layout.addWidget(self.text_area)
+
+        # 7. 复制按钮
+        self.btn_copy = QPushButton("📋 复制全部内容")
+        self.btn_copy.setFixedHeight(45)
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setStyleSheet("""
+            QPushButton {
+                background-color: #fff;
+                color: #333;
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+                border-color: #aaa;
+            }
+        """)
+        self.btn_copy.clicked.connect(self.copy_text)
+        layout.addWidget(self.btn_copy)
+
+        self.setLayout(layout)
+
+    # --- 逻辑功能 ---
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.accept()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        file_path = e.mimeData().urls()[0].toLocalFile()
+        self.load_video(file_path)
+
     def select_video(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "Media (*.mp4 *.mov *.avi *.mp3)")
-        if f: self.set_video(f)
-    def set_video(self, path):
-        self.current_video_path = path
-        self.lbl_path.setText(f"已就绪: {os.path.basename(path)}")
-        self.check_ready_state()
-    def start_transcribe(self):
-        self.btn_run.setEnabled(False)
-        self.result_area.clear()
-        self.trans_worker = TranscribeWorker(self.model, self.current_video_path)
-        self.trans_worker.log_signal.connect(self.log)
-        self.trans_worker.finished_signal.connect(self.on_transcribe_finished)
-        self.trans_worker.error_signal.connect(lambda m: QMessageBox.critical(self, "错误", m))
-        self.trans_worker.start()
-    def on_transcribe_finished(self, text):
-        self.result_area.setPlainText(text)
-        self.btn_run.setEnabled(True)
-        try: QApplication.beep()
-        except: pass
-        QMessageBox.information(self, "完成", "识别完成！")
-    def copy_result(self):
-        QGuiApplication.clipboard().setText(self.result_area.toPlainText())
+        f, _ = QFileDialog.getOpenFileName(self, "选择视频", "", "视频/音频 (*.mp4 *.mov *.avi *.mp3 *.m4a *.wav)")
+        if f:
+            self.load_video(f)
+
+    def load_video(self, path):
+        self.video_path = path
+        # 更新按钮文字，显示文件名
+        name = os.path.basename(path)
+        self.btn_import.setText(f"\n📄 已选择：\n{name}\n")
+        self.btn_import.setStyleSheet("""
+            QPushButton {
+                background-color: #f0fff4;
+                border: 2px solid #48c774;
+                border-radius: 15px;
+                color: #2f855a;
+            }
+        """)
+        self.status_label.setText("准备就绪，请点击“开始转换”")
+        self.btn_start.setEnabled(True)
+        self.progress.setValue(0)
+
+    def start_process(self):
+        if not self.video_path: return
+
+        # 锁定界面
+        self.btn_start.setEnabled(False)
+        self.btn_import.setEnabled(False)
+        self.btn_start.setText("⏳ 正在处理中...")
+        self.text_area.clear()
+
+        # 启动线程
+        # 默认使用 medium 模型，精准且速度适中
+        self.worker = WorkThread(self.video_path, "medium")
+        self.worker.status_signal.connect(self.update_status)
+        self.worker.progress_signal.connect(self.progress.setValue)
+        self.worker.result_signal.connect(self.on_success)
+        self.worker.error_signal.connect(self.on_error)
+        self.worker.start()
+
+    def update_status(self, msg):
+        self.status_label.setText(msg)
+
+    def on_success(self, text):
+        self.text_area.setPlainText(text)
+        self.reset_ui_state()
+        QMessageBox.information(self, "成功", "转换完成啦！\n快去看看结果对不对~")
+
+    def on_error(self, msg):
+        self.reset_ui_state()
+        self.status_label.setText("❌ 出错啦")
+        QMessageBox.warning(self, "哎呀", msg)
+
+    def reset_ui_state(self):
+        self.btn_start.setText("🚀 重新开始")
+        self.btn_start.setEnabled(True)
+        self.btn_import.setEnabled(True)
+
+    def copy_text(self):
+        content = self.text_area.toPlainText()
+        if not content:
+            self.status_label.setText("⚠️ 还没有内容可以复制哦")
+            return
+        QApplication.clipboard().setText(content)
         self.btn_copy.setText("✅ 已复制！")
-        QTimer.singleShot(1500, lambda: self.btn_copy.setText("📋 一键复制"))
-    def log(self, msg): self.log_area.append(msg)
-    def closeEvent(self, e):
-        if self.loader_worker: self.loader_worker.terminate()
-        if self.trans_worker: self.trans_worker.terminate()
-        gc.collect()
-        e.accept()
+        QTimer.singleShot(2000, lambda: self.btn_copy.setText("📋 复制全部内容"))
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    win = TranscriberWindow()
-    win.show()
+    window = MainWindow()
+    window.show()
     sys.exit(app.exec())
