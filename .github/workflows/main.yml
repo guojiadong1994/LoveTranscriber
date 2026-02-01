@@ -15,14 +15,14 @@ jobs:
         with:
           python-version: "3.10"
 
-      # 1) 先装基础构建工具（编译 ctranslate2 需要）
+      # 1) 构建工具（源码编译 ctranslate2 必备）
       - name: Install build tools
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade wheel setuptools cmake ninja
 
-      # 2) 安装项目依赖（可以包含 ctranslate2，后面会强制替换）
+      # 2) 安装项目依赖（先装一遍，后面会强制替换 ctranslate2）
       - name: Install project dependencies
         shell: pwsh
         run: |
@@ -34,23 +34,23 @@ jobs:
             echo "No requirements.txt found, skipping."
           }
 
-      # 3) 关键：强制从源码重建 ctranslate2，禁用 OpenMP runtime
-      - name: Rebuild ctranslate2 without OpenMP runtime
+      # 3) 关键：从 GitHub 源码编译安装 ctranslate2，并禁用 OpenMP runtime
+      - name: Rebuild ctranslate2 from GitHub (OPENMP_RUNTIME=NONE)
         shell: pwsh
         run: |
-          # 卸载 wheel（如果已经装过）
+          # 卸载已安装的 wheel（如果存在）
           pip uninstall -y ctranslate2
 
-          # 关键：禁用 OpenMP runtime（避免 Intel OMP libiomp5md.dll 初始化崩溃）
+          # 禁用 OpenMP runtime（核心：绕开 Intel OMP DLL 初始化不稳定）
           $env:CMAKE_ARGS = "-DOPENMP_RUNTIME=NONE"
 
-          # 强制源码编译安装
-          pip install --no-binary=ctranslate2 ctranslate2
+          # 从 GitHub tag 编译安装（注意：这里用 v4.6.3，和你之前 wheel 版本一致）
+          pip install "ctranslate2 @ git+https://github.com/OpenNMT/CTranslate2.git@v4.6.3"
 
           # 打印版本确认
           python -c "import ctranslate2; print('ctranslate2:', ctranslate2.__version__)"
 
-      # 4) 安装 PyInstaller
+      # 4) PyInstaller
       - name: Install PyInstaller
         shell: pwsh
         run: |
@@ -77,7 +77,7 @@ jobs:
             -n "LoveTranscriber_Portable" `
             $Target
 
-      # 6)（保守）仍做一次 libiomp5md.dll 去重：优先保留 ctranslate2 那份
+      # 6)（保守）仍做一次 libiomp5md.dll 去重
       - name: Deduplicate OpenMP DLLs (prefer ctranslate2)
         shell: pwsh
         run: |
