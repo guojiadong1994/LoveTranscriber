@@ -170,7 +170,7 @@ class WorkThread(QThread):
             self.status_signal.emit("🧠 正在唤醒 AI 引擎...")
             try:
                 # 🔥 改回 int8 (默认)，配合 KMP_AFFINITY=disabled 使用
-                model = WhisperModel(real_model_path, device="cpu", compute_type="int8", cpu_threads=4, local_files_only=True)
+                model = WhisperModel(real_model_path, device="cpu", compute_type="int8", cpu_threads=1, local_files_only=True)
                 print("Model Loaded!")
             except Exception as e:
                 print(f"LOAD CRASH: {e}"); traceback.print_exc()
