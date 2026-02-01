@@ -1,4 +1,4 @@
-name: Build LoveTranscriber (Faster-Whisper Edition)
+name: Build LoveTranscriber (Debug Mode)
 
 on: [push]
 
@@ -11,14 +11,13 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10' 
+        python-version: '3.10'
 
     - name: Install Dependencies
       run: |
-        # 强制更新 pip
         python -m pip install --upgrade pip
         
-        # 1. 安装项目依赖
+        # 1. 安装依赖
         if (Test-Path "requirements.txt") {
           pip install -r requirements.txt
         } elseif (Test-Path "LoveTranscriber/requirements.txt") {
@@ -28,24 +27,27 @@ jobs:
         # 2. 补装打包工具
         pip install pyinstaller
 
-    - name: Build EXE
+    - name: Build EXE (Debug Console Version)
       run: |
         if (Test-Path "main.py") { $Target = "main.py" } 
         elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
         else { echo "Error: Missing main.py"; exit 1 }
 
-        # 3. 打包命令 (加了 ctranslate2 的收集，防止漏文件)
-        pyinstaller -D -w --clean --noconfirm `
+        # 3. 打包命令修正版：
+        # -c : 开启控制台 (调试必备！看到黑框框才能看到报错)
+        # --collect-all huggingface_hub : 防止漏掉下载器库
+        pyinstaller -D -c --clean --noconfirm `
           --collect-all faster_whisper `
           --collect-all ctranslate2 `
-          -n "LoveTranscriber" `
+          --collect-all huggingface_hub `
+          -n "LoveTranscriber_Debug" `
           $Target
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: LoveTranscriber-Girlfriend-Edition
+        name: LoveTranscriber-Debug-Edition
         path: |
-          dist/LoveTranscriber
-          LoveTranscriber/dist/LoveTranscriber
+          dist/LoveTranscriber_Debug
+          LoveTranscriber/dist/LoveTranscriber_Debug
         overwrite: true
