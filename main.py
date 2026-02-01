@@ -6,11 +6,12 @@ import subprocess
 import tempfile
 import traceback
 import random
+import threading # ✅ 新增：用于后台吞吐日志，防止卡顿
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTextEdit, QMessageBox, QFileDialog, QGridLayout, 
-    QButtonGroup, QSizePolicy
+    QButtonGroup, QSizePolicy, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
@@ -51,7 +52,7 @@ class ProgressButton(QPushButton):
         self._progress = 0.0
         self._is_processing = False
         self.default_text = text
-        self.format_str = "正在转换 {0}%"
+        self.format_str = "正在转换... {0}%"
         self._custom_text = None
         self.setStyleSheet("""
             QPushButton { 
@@ -68,9 +69,9 @@ class ProgressButton(QPushButton):
         """)
 
     def set_progress(self, value):
-        if float(value) > self._progress:
-            self._progress = float(value)
-            self.update()
+        # 允许平滑倒退一点点(如果有调整)，但总体主要是向前
+        self._progress = float(value)
+        self.update()
 
     def set_text_override(self, text):
         self._custom_text = text
@@ -109,6 +110,9 @@ class ProgressButton(QPushButton):
         # 进度条
         if self._progress > 0:
             prog_width = max(30, (rect.width() * (self._progress / 100.0)))
+            # 限制不超过边界
+            if prog_width > rect.width(): prog_width = rect.width()
+            
             path = QPainterPath()
             path.addRoundedRect(rectf, 22, 22)
             painter.setClipPath(path)
@@ -193,7 +197,7 @@ class ToggleButton(QPushButton):
             """)
 
 # ==============================================================================
-# ✅ 核心逻辑线程 (匀速线性进度条)
+# ✅ 核心逻辑线程 (真正不卡顿的进度条)
 # ==============================================================================
 class TranscribeThread(QThread):
     status_signal = pyqtSignal(str)
@@ -214,6 +218,14 @@ class TranscribeThread(QThread):
             try: self.proc.kill()
             except: pass
 
+    def _drain_stdout(self, pipe):
+        """后台线程：专门吞吐日志，防止阻塞"""
+        try:
+            for _ in pipe:
+                pass # 啥也不干，就是读出来扔掉，确保管道通畅
+        except:
+            pass
+
     def run(self):
         try:
             ffmpeg = os.path.join(BASE_DIR, "tools", "ffmpeg", "ffmpeg.exe")
@@ -233,15 +245,12 @@ class TranscribeThread(QThread):
 
             # --- 1. 抽取音频 ---
             self.status_signal.emit("⏳ 正在提取音频...")
-            # 模拟一个快速的小进度
-            for i in range(1, 6):
-                if not self.is_running: return
-                self.progress_signal.emit(i)
-                time.sleep(0.05)
+            self.progress_signal.emit(2)
             
             tmp_wav = os.path.join(tempfile.gettempdir(), f"love_{int(time.time())}.wav")
             cmd_ff = [ffmpeg, "-y", "-i", self.media_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", tmp_wav]
             
+            # FFMPEG 很快，直接运行
             subprocess.run(
                 cmd_ff, 
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
@@ -251,7 +260,7 @@ class TranscribeThread(QThread):
             if not os.path.exists(tmp_wav): raise Exception("音频提取失败")
             if not self.is_running: return
 
-            # --- 2. 识别 ---
+            # --- 2. 识别 (进度条修复核心) ---
             self.status_signal.emit("🧠 正在AI思考中...")
             
             out_prefix = os.path.join(tempfile.gettempdir(), f"love_out_{int(time.time())}")
@@ -266,22 +275,33 @@ class TranscribeThread(QThread):
                 startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW if platform.system()=='Windows' else 0
             )
 
-            # 🚀 进度条算法优化：线性匀速爬升
+            # 🔥 关键修复：开启一个后台线程专门去读日志
+            # 这样主线程就不会因为读日志而被卡住了！
+            t = threading.Thread(target=self._drain_stdout, args=(self.proc.stdout,))
+            t.daemon = True
+            t.start()
+
+            # 🚀 进度条逻辑：完全独立的匀速爬升
             current_prog = 5.0
             
             while True:
-                if self.proc.poll() is not None: break
-                if not self.is_running: self.proc.kill(); return
+                # 检查进程是否结束
+                if self.proc.poll() is not None: 
+                    break
                 
-                # 每次增加一个极小值，模拟时间流逝
-                step = random.uniform(0.05, 0.15) 
+                if not self.is_running: 
+                    self.proc.kill()
+                    return
                 
+                # 匀速爬坡算法：每 0.05 秒走一小步，永不卡顿
+                # 如果没到 98%，就一直加
                 if current_prog < 98.0:
+                    # 随机一点点波动，看起来更真实
+                    step = random.uniform(0.02, 0.08)
                     current_prog += step
                     self.progress_signal.emit(int(current_prog))
                 
-                self.proc.stdout.readline()
-                time.sleep(0.1) 
+                time.sleep(0.05) # 刷新频率极高，保证丝滑
 
             if self.proc.returncode != 0: raise Exception("识别意外中断")
             if not os.path.exists(out_txt): raise Exception("未生成结果")
@@ -300,7 +320,7 @@ class TranscribeThread(QThread):
             self.error_signal.emit(str(e))
 
 # ==============================================================================
-# ✅ 主窗口 (紧凑布局 + 底部双按钮)
+# ✅ 主窗口 (布局紧凑版)
 # ==============================================================================
 class MainWindow(QWidget):
     def __init__(self):
@@ -323,10 +343,12 @@ class MainWindow(QWidget):
         # === 左侧控制区 (40%) ===
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(10) # 全局紧凑
+        # 🔥 关键调整：全局间距调小，更紧凑
+        left_layout.setSpacing(8) 
+        # 设置顶部对齐，防止内容跑到底下去
+        left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # 1. 导入部分
-        # 📝 修改点：文案改为“步骤 1: 选择视频”
         title1 = QLabel("步骤 1: 选择视频") 
         title1.setFont(QFont(UI_FONT, 11, QFont.Weight.Bold))
         title1.setStyleSheet("color: #444;")
@@ -342,7 +364,8 @@ class MainWindow(QWidget):
         self.btn_import.clicked.connect(self.sel_media)
         left_layout.addWidget(self.btn_import)
 
-        left_layout.addSpacing(15) 
+        # 小间隔
+        left_layout.addSpacing(20) 
 
         # 2. 模型选择部分
         title2 = QLabel("步骤 2: 选择模式")
@@ -360,12 +383,15 @@ class MainWindow(QWidget):
         left_layout.addLayout(grid)
         self.on_model_click(self.model_btns[0])
 
-        # 3. 状态与开始
-        left_layout.addStretch(1)
+        # 小间隔
+        left_layout.addSpacing(15)
 
+        # 3. 状态与开始 (紧凑布局)
+        # 🔥 关键调整：去掉之前的 addStretch，改为直接放，这样就提上来了
+        
         self.lbl_stat = QLabel("准备就绪")
         self.lbl_stat.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_stat.setStyleSheet("color: #888; font-size: 13px; margin-bottom: 5px;")
+        self.lbl_stat.setStyleSheet("color: #888; font-size: 13px; margin-bottom: 2px;")
         left_layout.addWidget(self.lbl_stat)
 
         self.btn_start = ProgressButton("✨ 开始转换")
@@ -373,6 +399,9 @@ class MainWindow(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self.start)
         left_layout.addWidget(self.btn_start)
+
+        # 最后加一个 Stretch，把上面所有的东西顶在顶部
+        left_layout.addStretch(1)
 
         # === 右侧结果区 (60%) ===
         right_widget = QWidget()
