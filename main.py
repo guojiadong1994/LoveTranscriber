@@ -7,6 +7,12 @@ import tempfile
 import traceback
 import threading 
 
+# 🔥 引入 zhconv (确保 main.yml 里已经 pip install zhconv)
+try:
+    import zhconv
+except ImportError:
+    zhconv = None
+
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTextEdit, QMessageBox, QFileDialog, QGridLayout, 
@@ -31,6 +37,14 @@ MODEL_FILE_MAP = {
     "base": "ggml-base.bin",
     "large-v3": "ggml-large-v3.bin",
     "small": "ggml-small.bin",
+}
+
+# ⚡ 进度条速度配置
+PROGRESS_SPEED_MAP = {
+    "base": 1.5,      # 极速
+    "small": 0.8,     # 省电
+    "medium": 0.3,    # 推荐
+    "large-v3": 0.15  # 深度
 }
 
 MODEL_OPTIONS = [
@@ -194,7 +208,7 @@ class ToggleButton(QPushButton):
             """)
 
 # ==============================================================================
-# ✅ 核心逻辑线程 (极简稳定版)
+# ✅ 核心逻辑线程
 # ==============================================================================
 class TranscribeThread(QThread):
     status_signal = pyqtSignal(str)
@@ -208,6 +222,7 @@ class TranscribeThread(QThread):
         self.model_code = model_code
         self.is_running = True
         self.proc = None 
+        self.speed_step = PROGRESS_SPEED_MAP.get(model_code, 0.3)
 
     def stop(self):
         self.is_running = False
@@ -259,10 +274,9 @@ class TranscribeThread(QThread):
             out_prefix = os.path.join(tempfile.gettempdir(), f"love_out_{int(time.time())}")
             out_txt = out_prefix + ".txt"
             
-            # 🔥 核心修改：去掉了 -p 参数，防止报错！
             cmd_wh = [
                 whisper_cli, "-m", model_path, "-f", tmp_wav, 
-                "-l", "zh", # 依然保留强制中文
+                "-l", "zh", 
                 "-otxt", "-of", out_prefix
             ]
 
@@ -278,7 +292,7 @@ class TranscribeThread(QThread):
             t.daemon = True
             t.start()
 
-            # 🚀 进度条：超级慢速匀速版
+            # 🚀 进度条：智能变速
             current_prog = 5.0
             
             while True:
@@ -290,9 +304,7 @@ class TranscribeThread(QThread):
                     return
                 
                 if current_prog < 99.0:
-                    # 🔥 修改点：步长从 1.5 改为 0.5 (慢了 3 倍)
-                    # 这样进度条会走得非常稳，不会一下跑完
-                    current_prog += 0.5 
+                    current_prog += self.speed_step
                     self.progress_signal.emit(int(current_prog))
                 
                 time.sleep(0.1) 
@@ -303,21 +315,26 @@ class TranscribeThread(QThread):
 
             if not os.path.exists(out_txt): raise Exception("未生成结果")
 
+            # 🔥 后处理：繁转简
             with open(out_txt, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read().strip()
+                raw_text = f.read().strip()
+            
+            final_text = raw_text
+            if zhconv:
+                final_text = zhconv.convert(raw_text, 'zh-cn')
 
             try: os.remove(tmp_wav); os.remove(out_txt)
             except: pass
 
             self.progress_signal.emit(100) 
             self.status_signal.emit("✅ 转换完成")
-            self.result_signal.emit(text)
+            self.result_signal.emit(final_text)
 
         except Exception as e:
             self.error_signal.emit(str(e))
 
 # ==============================================================================
-# ✅ 主窗口 (完美对齐版)
+# ✅ 主窗口 (高度缩减 + 完美对称版)
 # ==============================================================================
 class MainWindow(QWidget):
     def __init__(self):
@@ -385,6 +402,7 @@ class MainWindow(QWidget):
         self.lbl_stat.setStyleSheet("color: #888; font-size: 13px; margin-bottom: 2px;")
         left_layout.addWidget(self.lbl_stat)
 
+        # 弹簧
         left_layout.addStretch(1)
 
         self.btn_start = ProgressButton("✨ 开始转换")
@@ -396,20 +414,28 @@ class MainWindow(QWidget):
         # === 右侧结果区 (60%) ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(10) 
+        right_layout.setSpacing(10)
+        # 顶部对齐，保证和左侧一致
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 1. 文本框
+        # 1. 文本框 (限制高度！)
         self.txt = QTextEdit()
         self.txt.setPlaceholderText("转换结果将显示在这里...")
         self.txt.setFont(QFont(UI_FONT, 11))
-        self.txt.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 🔥 关键修改：设置最大高度，不让它无限长
+        # 380px 大概和左边的 导入+模式 区域一样高
+        self.txt.setMaximumHeight(380) 
         self.txt.setStyleSheet("border: 1px solid #ddd; border-radius: 10px; padding: 10px; background-color: #fff;")
         right_layout.addWidget(self.txt)
+
+        # 🔥 关键修改：在这里加一个弹簧
+        # 这样文本框在上面，按钮在最下面，中间是留白，和左侧完美对称！
+        right_layout.addStretch(1)
 
         # 2. 底部功能区
         bottom_box = QVBoxLayout()
         bottom_box.setSpacing(10)
-        bottom_box.setContentsMargins(0, 0, 0, 0) 
+        bottom_box.setContentsMargins(0, 0, 0, 0) # 像素级对齐
 
         toggles_layout = QHBoxLayout()
         toggles_layout.setSpacing(10)
