@@ -15,20 +15,60 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Dependencies
+      # 1) 先装基础构建工具（编译 ctranslate2 需要）
+      - name: Install build tools
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path "requirements.txt") { pip install -r requirements.txt } 
-          elseif (Test-Path "LoveTranscriber/requirements.txt") { pip install -r LoveTranscriber/requirements.txt }
-          pip install pyinstaller
+          python -m pip install --upgrade wheel setuptools cmake ninja
 
-      - name: Build EXE (Portable with DLLs)
+      # 2) 安装项目依赖（可以包含 ctranslate2，后面会强制替换）
+      - name: Install project dependencies
         shell: pwsh
         run: |
-          if (Test-Path "main.py") { $Target = "main.py" } 
-          elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
-          else { echo "Error: Missing main.py"; exit 1 }
+          if (Test-Path "requirements.txt") {
+            pip install -r requirements.txt
+          } elseif (Test-Path "LoveTranscriber/requirements.txt") {
+            pip install -r LoveTranscriber/requirements.txt
+          } else {
+            echo "No requirements.txt found, skipping."
+          }
+
+      # 3) 关键：强制从源码重建 ctranslate2，禁用 OpenMP runtime
+      - name: Rebuild ctranslate2 without OpenMP runtime
+        shell: pwsh
+        run: |
+          # 卸载 wheel（如果已经装过）
+          pip uninstall -y ctranslate2
+
+          # 关键：禁用 OpenMP runtime（避免 Intel OMP libiomp5md.dll 初始化崩溃）
+          $env:CMAKE_ARGS = "-DOPENMP_RUNTIME=NONE"
+
+          # 强制源码编译安装
+          pip install --no-binary=ctranslate2 ctranslate2
+
+          # 打印版本确认
+          python -c "import ctranslate2; print('ctranslate2:', ctranslate2.__version__)"
+
+      # 4) 安装 PyInstaller
+      - name: Install PyInstaller
+        shell: pwsh
+        run: |
+          pip install pyinstaller
+
+      # 5) 打包
+      - name: Build EXE (Portable)
+        shell: pwsh
+        run: |
+          if (Test-Path "main.py") {
+            $Target = "main.py"
+          } elseif (Test-Path "LoveTranscriber/main.py") {
+            cd LoveTranscriber
+            $Target = "main.py"
+          } else {
+            echo "Error: Missing main.py"
+            exit 1
+          }
 
           pyinstaller -D -c --clean --noconfirm `
             --collect-all faster_whisper `
@@ -37,7 +77,8 @@ jobs:
             -n "LoveTranscriber_Portable" `
             $Target
 
-      - name: Deduplicate OpenMP DLLs
+      # 6)（保守）仍做一次 libiomp5md.dll 去重：优先保留 ctranslate2 那份
+      - name: Deduplicate OpenMP DLLs (prefer ctranslate2)
         shell: pwsh
         run: |
           $dist1 = "dist/LoveTranscriber_Portable"
@@ -49,20 +90,22 @@ jobs:
 
           echo "Target dist: $target"
 
-          # 找出所有 libiomp5md.dll
           $dlls = Get-ChildItem -Path $target -Recurse -Filter "libiomp5md.dll" -ErrorAction SilentlyContinue
           echo "Found libiomp5md.dll count: $($dlls.Count)"
 
           if ($dlls.Count -gt 1) {
-            # 保留第一个，删除其余
-            $keep = $dlls[0].FullName
-            echo "Keep: $keep"
-            $dlls | Select-Object -Skip 1 | ForEach-Object {
+            $keepObj = $dlls | Where-Object { $_.FullName -match "ctranslate2" } | Select-Object -First 1
+            if ($null -eq $keepObj) { $keepObj = $dlls[0] }
+
+            echo "Keep: $($keepObj.FullName)"
+
+            $dlls | Where-Object { $_.FullName -ne $keepObj.FullName } | ForEach-Object {
               echo "Remove: $($_.FullName)"
               Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
             }
           }
 
+      # 7) 上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:

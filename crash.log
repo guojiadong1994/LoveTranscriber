@@ -1,17 +1,2 @@
-===== START 2026-02-01 23:32:42 =====
+===== START 2026-02-02 00:00:23 =====
 Fix: Ultra9 env patch + worker subprocess isolation
-{"type": "status", "text": "⏳ 正在校验/下载模型..."}
-{"type": "download", "mb": 0, "expected": 145}
-{"type": "progress", "value": 5}
-{"type": "stage", "fmt": "运行中 {0}%"}
-{"type": "status", "text": "🧠 正在唤醒 AI 引擎..."}
-{"type": "progress", "value": 40}
-{"type": "status", "text": "🔧 加载模型 compute_type=int8 ..."}
-{"type": "status", "text": "🎧 正在分析..."}
-{"type": "progress", "value": 55}
-{"type": "progress", "value": 68}
-{"type": "progress", "value": 79}
-{"type": "progress", "value": 93}
-{"type": "progress", "value": 98}
-{"type": "progress", "value": 100}
-{"type": "status", "text": "✅ 完成！"}

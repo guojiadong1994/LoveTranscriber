@@ -12,28 +12,38 @@ import json
 # 🛡️ 0. Ultra 9 / Windows 原生库防爆补丁（必须在任何大库 import 之前）
 # ==============================================================================
 def apply_ultra9_env_patch():
-    # OpenMP / Intel OMP：禁用大小核绑核 + 降低抢占/等待问题
+    # =========================================================
+    # 目标：在 Windows + Core Ultra（大小核）上降低 OpenMP 初始化崩溃概率
+    # 原则：只保留“最核心”的设置，避免互相打架
+    # =========================================================
+
+    # 1) Intel OpenMP：禁用亲和性绑定（核心项）
     os.environ["KMP_AFFINITY"] = "disabled"
+
+    # 2) 等待策略/阻塞：降低线程抢占与初始化阶段风险
     os.environ["OMP_WAIT_POLICY"] = "PASSIVE"
     os.environ["KMP_BLOCKTIME"] = "0"
-    os.environ["OMP_PROC_BIND"] = "FALSE"
-    os.environ["OMP_PLACES"] = "cores"
-    os.environ["OMP_DYNAMIC"] = "FALSE"
 
-    # 线程数：初始化阶段强制单线程，避免 OMP 初始化阶段在大小核上抽风
+    # 3) 初始化阶段强制单线程（核心项）
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
     os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-    # 指令集降级（双保险）
+    # 4) 指令集降级（双保险）
     os.environ["MKL_ENABLE_INSTRUCTIONS"] = "AVX2"
 
-    # HF 镜像与超时
+    # 5) HuggingFace 下载环境（与你当前项目一致）
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "120"
+
+    # ❌ 刻意不设置以下项（避免日志里提示的“ignored because KMP_AFFINITY defined”）
+    # os.environ["OMP_PLACES"] = "cores"
+    # os.environ["OMP_PROC_BIND"] = "FALSE"
+    # os.environ["OMP_DYNAMIC"] = "FALSE"
+
 
 apply_ultra9_env_patch()
 
@@ -451,8 +461,8 @@ def worker_main(video_path, model_code, out_txt):
     expected_mb = MODEL_EXPECTED_SIZE.get(model_code, 1000)
 
     def jprint(obj):
-        # worker -> GUI：统一 JSON 行
-        print(json.dumps(obj, ensure_ascii=False), flush=True)
+        # 关键：ensure_ascii=True，保证 stdout 全 ASCII，彻底消灭乱码
+        print(json.dumps(obj, ensure_ascii=True), flush=True)
 
     jprint({"type": "status", "text": "⏳ 正在校验/下载模型..."})
     jprint({"type": "download", "mb": 0, "expected": expected_mb})
