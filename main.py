@@ -5,7 +5,6 @@ import time
 import subprocess
 import tempfile
 import traceback
-import random
 import threading 
 
 from PyQt6.QtWidgets import (
@@ -46,7 +45,7 @@ MODEL_OPTIONS = [
 # ==============================================================================
 
 class ProgressButton(QPushButton):
-    """带丝滑进度条动画的按钮"""
+    """带进度条动画的按钮"""
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self._progress = 0.0
@@ -195,7 +194,7 @@ class ToggleButton(QPushButton):
             """)
 
 # ==============================================================================
-# ✅ 核心逻辑线程
+# ✅ 核心逻辑线程 (极简稳定版)
 # ==============================================================================
 class TranscribeThread(QThread):
     status_signal = pyqtSignal(str)
@@ -217,7 +216,6 @@ class TranscribeThread(QThread):
             except: pass
 
     def _drain_stdout(self, pipe):
-        """后台线程：专门吞吐日志，防止阻塞"""
         try:
             for _ in pipe: pass 
         except: pass
@@ -241,7 +239,7 @@ class TranscribeThread(QThread):
 
             # --- 1. 抽取音频 ---
             self.status_signal.emit("⏳ 正在提取音频...")
-            self.progress_signal.emit(2)
+            self.progress_signal.emit(5)
             
             tmp_wav = os.path.join(tempfile.gettempdir(), f"love_{int(time.time())}.wav")
             cmd_ff = [ffmpeg, "-y", "-i", self.media_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", tmp_wav]
@@ -261,16 +259,12 @@ class TranscribeThread(QThread):
             out_prefix = os.path.join(tempfile.gettempdir(), f"love_out_{int(time.time())}")
             out_txt = out_prefix + ".txt"
             
-            # 🔥 核心修改：加入了 -p "请用简体中文。" 参数
-            # 这会强制模型尽可能输出简体字
+            # -l zh: 强制中文
+            # -p: 提示词强制简体
             cmd_wh = [
-                whisper_cli, 
-                "-m", model_path, 
-                "-f", tmp_wav, 
-                "-l", "zh", 
-                "-p", "请用简体中文。", # <--- 这里的 Prompt 起了关键作用
-                "-otxt", 
-                "-of", out_prefix
+                whisper_cli, "-m", model_path, "-f", tmp_wav, 
+                "-l", "zh", "-p", "请用简体中文。", 
+                "-otxt", "-of", out_prefix
             ]
 
             self.proc = subprocess.Popen(
@@ -285,24 +279,27 @@ class TranscribeThread(QThread):
             t.daemon = True
             t.start()
 
-            # 🚀 进度条逻辑
+            # 🚀 进度条：极简匀速
             current_prog = 5.0
             
             while True:
-                if self.proc.poll() is not None: break
+                if self.proc.poll() is not None:
+                    break
                 
                 if not self.is_running: 
                     self.proc.kill()
                     return
                 
-                if current_prog < 98.0:
-                    step = random.uniform(0.02, 0.08)
-                    current_prog += step
+                if current_prog < 99.0:
+                    current_prog += 1.5 
                     self.progress_signal.emit(int(current_prog))
                 
-                time.sleep(0.05) 
+                time.sleep(0.1) 
 
-            if self.proc.returncode != 0: raise Exception("识别意外中断")
+            if self.proc.returncode != 0: 
+                if not os.path.exists(out_txt):
+                    raise Exception("识别意外中断，未生成结果")
+
             if not os.path.exists(out_txt): raise Exception("未生成结果")
 
             with open(out_txt, "r", encoding="utf-8", errors="ignore") as f:
@@ -311,7 +308,7 @@ class TranscribeThread(QThread):
             try: os.remove(tmp_wav); os.remove(out_txt)
             except: pass
 
-            self.progress_signal.emit(100)
+            self.progress_signal.emit(100) 
             self.status_signal.emit("✅ 转换完成")
             self.result_signal.emit(text)
 
@@ -319,7 +316,7 @@ class TranscribeThread(QThread):
             self.error_signal.emit(str(e))
 
 # ==============================================================================
-# ✅ 主窗口 (布局紧凑版)
+# ✅ 主窗口 (完美对齐版)
 # ==============================================================================
 class MainWindow(QWidget):
     def __init__(self):
@@ -342,10 +339,11 @@ class MainWindow(QWidget):
         # === 左侧控制区 (40%) ===
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(8) 
+        # 左右两侧的内部间距保持一致，方便对齐
+        left_layout.setSpacing(10) 
         left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 1. 导入部分
+        # 1. 导入
         title1 = QLabel("步骤 1: 选择视频") 
         title1.setFont(QFont(UI_FONT, 11, QFont.Weight.Bold))
         title1.setStyleSheet("color: #444;")
@@ -363,7 +361,7 @@ class MainWindow(QWidget):
 
         left_layout.addSpacing(20) 
 
-        # 2. 模型选择部分
+        # 2. 模式
         title2 = QLabel("步骤 2: 选择模式")
         title2.setFont(QFont(UI_FONT, 11, QFont.Weight.Bold))
         title2.setStyleSheet("color: #444;")
@@ -387,18 +385,19 @@ class MainWindow(QWidget):
         self.lbl_stat.setStyleSheet("color: #888; font-size: 13px; margin-bottom: 2px;")
         left_layout.addWidget(self.lbl_stat)
 
+        # 弹簧放在按钮上面，把按钮推到底部
+        left_layout.addStretch(1)
+
         self.btn_start = ProgressButton("✨ 开始转换")
         self.btn_start.setFixedHeight(50) 
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self.start)
         left_layout.addWidget(self.btn_start)
 
-        left_layout.addStretch(1)
-
         # === 右侧结果区 (60%) ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setSpacing(12)
+        right_layout.setSpacing(10) # 间距与左侧保持一致
 
         # 1. 文本框
         self.txt = QTextEdit()
@@ -409,8 +408,10 @@ class MainWindow(QWidget):
         right_layout.addWidget(self.txt)
 
         # 2. 底部功能区
+        # 🔥 关键：设置 margin 为 0，确保像素级对齐
         bottom_box = QVBoxLayout()
         bottom_box.setSpacing(10)
+        bottom_box.setContentsMargins(0, 0, 0, 0) # <--- 这一句实现了底对底对齐
 
         toggles_layout = QHBoxLayout()
         toggles_layout.setSpacing(10)
