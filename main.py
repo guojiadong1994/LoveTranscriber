@@ -1,66 +1,64 @@
 import sys
 import os
 import platform
-import time
+import shutil
+import random # 引入随机，让进度条抖动更自然
 
-# ==============================================================================
-# 🛡️ 防闪退核心补丁 (必须放在最前面)
-# ==============================================================================
-
-# 1. 魔法指令：强制使用国内镜像
+# 1. 强制国内镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-# 2. 禁用 TQDM 进度条 (防止底层库打印进度导致无控制台模式崩溃)
+# 2. 禁止控制台输出
 os.environ["TQDM_DISABLE"] = "1"
 
-# 3. "黑洞"类：吃掉所有打印信息
 class NullWriter:
     def write(self, text): pass
     def flush(self): pass
 
-# 4. 如果是打包环境，强制接管 stdout/stderr
-# 这样任何库想打印东西，都会被扔进黑洞，不会因为找不到控制台而闪退
 if getattr(sys, 'frozen', False):
     sys.stdout = NullWriter()
     sys.stderr = NullWriter()
 
-# ==============================================================================
-
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QTextEdit, QProgressBar, QMessageBox, QFileDialog, 
-                             QFrame, QGridLayout, QStyleOptionButton, QStyle)
+                             QFrame, QGridLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QRectF
-from PyQt6.QtGui import QFont, QColor, QPalette, QPainter, QBrush, QPen, QPainterPath
+from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
+
+try:
+    from faster_whisper import WhisperModel
+    from huggingface_hub import snapshot_download
+    HAS_WHISPER = True
+except ImportError:
+    HAS_WHISPER = False
 
 # === 全局配置 ===
 IS_MAC = (platform.system() == 'Darwin')
 UI_FONT = "Microsoft YaHei" if not IS_MAC else "PingFang SC"
 
-MODEL_SPECS = {
-    "medium":   {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71", "size": 1500},
-    "base":     {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db", "size": 150},
-    "large-v3": {"name": "🧠 深度模式", "desc": "超准但稍慢", "code": "large-v3", "color": "#00cec9", "size": 3100},
-    "small":    {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c", "size": 500}
+MODEL_MAP = {
+    "medium":   "systran/faster-whisper-medium",
+    "base":     "systran/faster-whisper-base",
+    "large-v3": "systran/faster-whisper-large-v3",
+    "small":    "systran/faster-whisper-small"
 }
-MODEL_OPTIONS = list(MODEL_SPECS.values())
 
-# === 自定义：带进度条的按钮 ===
+MODEL_OPTIONS = [
+    {"name": "🌟 推荐模式", "desc": "精准与速度平衡", "code": "medium", "color": "#2ecc71"},
+    {"name": "🚀 极速模式", "desc": "速度最快", "code": "base", "color": "#3498db"},
+    {"name": "🧠 深度模式", "desc": "超准 but 稍慢", "code": "large-v3", "color": "#00cec9"},
+    {"name": "⚡ 省电模式", "desc": "轻量级", "code": "small", "color": "#1abc9c"}
+]
+
+# === 自定义按钮 (智能变速核心) ===
 class ProgressButton(QPushButton):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self._progress = 0.0
         self._is_processing = False
         self.default_text = text
-        self.processing_text = "转换中 {0}%"
-        self._extra_text = "" 
-        
+        self.processing_text = "运行中 {0}%"
         self.setStyleSheet("""
             QPushButton {
-                background-color: #0078d7; 
-                color: white; 
-                border-radius: 30px;
-                font-weight: bold;
-                font-size: 20px; 
+                background-color: #0078d7; color: white; border-radius: 30px; font-weight: bold; font-size: 20px; 
             }
             QPushButton:hover { background-color: #0063b1; }
             QPushButton:pressed { background-color: #005a9e; }
@@ -68,21 +66,46 @@ class ProgressButton(QPushButton):
         """)
 
     def set_progress(self, value, text_override=None):
-        if value > self._progress:
-            self._progress = float(value)
-        
-        if text_override:
-            self.setText(text_override)
-        else:
-            self.setText(self.processing_text.format(int(self._progress)))
+        # 真实进度强制更新 (通常是跳跃性的)
+        if value > self._progress: self._progress = float(value)
+        self.setText(text_override if text_override else self.processing_text.format(int(self._progress)))
         self.update() 
 
-    def increment_fake_progress(self, amount=0.2):
-        if self._progress < 99.0:
-            self._progress += amount
-            if self._progress > 99.0: self._progress = 99.0
-            self.setText(self.processing_text.format(int(self._progress)))
-            self.update()
+    # 🔥🔥🔥 核心修改：分段阻尼算法 🔥🔥🔥
+    def auto_creep_progress(self):
+        # 这是一个“假”进度，根据当前位置决定爬升速度
+        # 模拟 Zeno's Paradox (芝诺悖论)：越接近目标，跑得越慢，永远不到达
+
+        current = self._progress
+        increment = 0.0
+
+        # === 第一阶段：下载阶段 (天花板 39%) ===
+        # 这个阶段最长，可能持续几分钟
+        if current < 39.0:
+            if current < 15.0:   increment = 0.5  # 起步快一点，给点信心
+            elif current < 30.0: increment = 0.1  # 中间放慢
+            else:                increment = 0.01 # 快到顶了，像蜗牛一样爬，死活不过 39
+
+        # === 第二阶段：加载阶段 (天花板 49%) ===
+        # 只要后台没发“加载完成(50%)”的指令，这里就卡在 49%
+        elif current >= 40.0 and current < 49.0:
+            increment = 0.05
+
+        # === 第三阶段：识别阶段 (天花板 98%) ===
+        # 这里通常有真实进度更新，假进度只是作为补充
+        elif current >= 50.0 and current < 98.0:
+            increment = 0.1
+
+        # 应用增量
+        self._progress += increment
+        
+        # 再次兜底，防止溢出区间
+        if current < 40.0 and self._progress >= 39.9: self._progress = 39.9
+        if current < 50.0 and self._progress >= 49.9: self._progress = 49.9
+        if self._progress >= 99.0: self._progress = 99.0
+
+        self.setText(self.processing_text.format(int(self._progress)))
+        self.update()
 
     def start_processing(self):
         self._is_processing = True
@@ -101,18 +124,14 @@ class ProgressButton(QPushButton):
         if not self._is_processing:
             super().paintEvent(event)
             return
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
         rectf = QRectF(rect)
-
-        # 1. 背景
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#f0f0f0"))
         painter.drawRoundedRect(rectf, 30, 30)
-
-        # 2. 进度条
+        
         if self._progress > 0:
             prog_width = (rect.width() * (self._progress / 100.0))
             if prog_width < 30: prog_width = 30
@@ -122,51 +141,12 @@ class ProgressButton(QPushButton):
             painter.setBrush(QColor("#0078d7"))
             painter.drawRect(0, 0, int(prog_width), int(rect.height()))
             painter.setClipping(False)
-
-        # 3. 文字
+            
         painter.setPen(QColor("#333") if self._progress < 55 else QColor("white"))
         font = self.font()
         font.setPointSize(16) 
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.text())
-
-
-# === 下载监视线程 (加固版) ===
-class DownloadMonitor(QThread):
-    size_signal = pyqtSignal(int, int)
-
-    def __init__(self, target_folder, estimated_size_mb):
-        super().__init__()
-        self.target_folder = target_folder
-        self.estimated_size_mb = estimated_size_mb
-        self.is_running = True
-
-    def get_folder_size(self):
-        total_size = 0
-        try:
-            # 增加 try-except 防止在文件写入瞬间读取导致权限错误
-            for dirpath, dirnames, filenames in os.walk(self.target_folder):
-                for f in filenames:
-                    fp = os.path.join(dirpath, f)
-                    # 忽略快捷方式和临时锁文件
-                    if not os.path.islink(fp):
-                        try:
-                            total_size += os.path.getsize(fp)
-                        except OSError:
-                            continue 
-        except Exception:
-            pass
-        return total_size / (1024 * 1024) 
-
-    def run(self):
-        while self.is_running:
-            current_mb = int(self.get_folder_size())
-            self.size_signal.emit(current_mb, self.estimated_size_mb)
-            time.sleep(0.5) 
-
-    def stop(self):
-        self.is_running = False
-
 
 # === 核心工作线程 ===
 class WorkThread(QThread):
@@ -179,53 +159,68 @@ class WorkThread(QThread):
         super().__init__()
         self.video_path = video_path
         self.model_code = model_code
+        self.repo_id = MODEL_MAP[model_code]
         self.is_running = True
-        self.monitor = None
 
     def run(self):
-        # 延迟导包
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            self.error_signal.emit("错误：未检测到 faster-whisper 库！")
+        if not HAS_WHISPER:
+            self.error_signal.emit("错误：环境不完整，缺少 faster-whisper")
             return
 
         try:
-            # 1. 准备路径
             if getattr(sys, 'frozen', False):
                 base_dir = os.path.dirname(sys.executable)
             else:
                 base_dir = os.path.dirname(os.path.abspath(__file__))
-            model_dir = os.path.join(base_dir, "models")
-            if not os.path.exists(model_dir):
-                os.makedirs(model_dir)
+            
+            models_root = os.path.join(base_dir, "models")
+            model_dir = os.path.join(models_root, f"models--{self.repo_id.replace('/', '--')}")
 
-            # 2. 启动下载监视器
-            target_mb = MODEL_SPECS[self.model_code]["size"]
-            self.monitor = DownloadMonitor(model_dir, target_mb)
-            self.monitor.size_signal.connect(self.on_download_update)
-            self.monitor.start()
+            # --- 阶段 1: 下载 (前台进度条会卡在 39% 等待) ---
+            self.status_signal.emit(f"⏳ 步骤 1/3: 正在下载 AI 模型 (文件较大请耐心等待)...")
+            
+            try:
+                snapshot_download(
+                    repo_id=self.repo_id,
+                    repo_type="model",
+                    local_dir=model_dir,
+                    resume_download=True,
+                    max_workers=4
+                )
+            except Exception as dl_err:
+                if os.path.exists(model_dir):
+                    try: shutil.rmtree(model_dir)
+                    except: pass
+                raise Exception(f"网络下载失败: {str(dl_err)}")
 
-            self.status_signal.emit(f"⏳ 正在下载/加载模型 (约 {target_mb} MB)...")
-            
-            # 3. 开始加载
-            # 注意：这里的 download_root 会触发下载
-            model = WhisperModel(
-                self.model_code, 
-                device="cpu", 
-                compute_type="int8", 
-                download_root=model_dir
-            )
-            
-            # 停止监视
-            self.monitor.stop()
-            self.monitor.wait()
-            
             if not self.is_running: return
-            self.progress_signal.emit(20, None) 
+            
+            # 🔥 关键点：下载完成，发送 40% 信号，突破第一层天花板
+            self.progress_signal.emit(40, "加载中...")
 
-            # 4. 分析
-            self.status_signal.emit("🎧 正在分析语音内容...")
+            # --- 阶段 2: 加载 (前台进度条会卡在 49% 等待) ---
+            self.status_signal.emit("🧠 步骤 2/3: 正在唤醒 AI 引擎...")
+            
+            try:
+                model = WhisperModel(
+                    model_dir, 
+                    device="cpu", 
+                    compute_type="int8",
+                    local_files_only=True
+                )
+            except Exception as load_err:
+                if os.path.exists(model_dir):
+                    try: shutil.rmtree(model_dir)
+                    except: pass
+                raise Exception(f"模型文件损坏，已重置，请重试。")
+
+            if not self.is_running: return
+            
+            # 🔥 关键点：加载完成，发送 50% 信号，突破第二层天花板
+            self.progress_signal.emit(50, "分析中...")
+
+            # --- 阶段 3: 识别 (50% - 100%) ---
+            self.status_signal.emit("🎧 步骤 3/3: 正在分析语音内容...")
             
             segments, info = model.transcribe(
                 self.video_path, beam_size=5, language="zh",
@@ -244,28 +239,19 @@ class WorkThread(QThread):
                 current_time = segment.end
                 
                 if total_duration > 0:
-                    progress = 20 + int((current_time / total_duration) * 78)
+                    # 进度区间 50% -> 98%
+                    progress = 50 + int((current_time / total_duration) * 48)
                     self.progress_signal.emit(progress, None)
 
-            self.progress_signal.emit(100, None)
+            self.progress_signal.emit(100, "完成")
             self.status_signal.emit("✅ 转换完成！")
             self.result_signal.emit(full_text)
 
         except Exception as e:
-            if self.monitor: self.monitor.stop()
-            self.error_signal.emit(f"出错: {str(e)}")
-
-    def on_download_update(self, current_mb, target_mb):
-        if target_mb > 0:
-            dl_progress = int((current_mb / target_mb) * 19) 
-            if dl_progress > 19: dl_progress = 19
-            msg = f"下载中 {current_mb}MB / {target_mb}MB"
-            self.progress_signal.emit(dl_progress, msg)
+            self.error_signal.emit(str(e))
 
     def stop(self):
         self.is_running = False
-        if self.monitor: self.monitor.stop()
-
 
 # === 模型卡片 ===
 class ModelCard(QPushButton):
@@ -290,7 +276,6 @@ class ModelCard(QPushButton):
         
         layout.addWidget(self.lbl_title)
         layout.addWidget(self.lbl_desc)
-        
         self.update_style(False)
 
     def update_style(self, selected):
@@ -323,12 +308,12 @@ class MainWindow(QWidget):
         self.setWindowTitle("❤️ 专属语音转文字助手")
         self.resize(1100, 700) 
         self.setAcceptDrops(True)
-        
         self.video_path = ""
         self.selected_model = "medium"
         self.worker = None
         self.model_btns = []
         
+        # 心跳定时器 (控制假进度)
         self.fake_progress_timer = QTimer()
         self.fake_progress_timer.timeout.connect(self.update_fake_progress)
 
@@ -339,10 +324,9 @@ class MainWindow(QWidget):
         main_layout.setContentsMargins(40, 40, 40, 40)
         main_layout.setSpacing(40)
 
-        # =========== 左侧栏 ===========
+        # 左侧
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(25) 
 
         lbl_step1 = QLabel("第一步：上传视频")
@@ -354,12 +338,7 @@ class MainWindow(QWidget):
         self.import_area.setFixedHeight(140) 
         self.import_area.setFont(QFont(UI_FONT, 15))
         self.import_area.setStyleSheet("""
-            QPushButton {
-                background-color: #f0f7ff;
-                border: 3px dashed #0078d7;
-                border-radius: 20px;
-                color: #0078d7;
-            }
+            QPushButton { background-color: #f0f7ff; border: 3px dashed #0078d7; border-radius: 20px; color: #0078d7; }
             QPushButton:hover { background-color: #e0efff; }
         """)
         self.import_area.clicked.connect(self.select_video)
@@ -394,10 +373,9 @@ class MainWindow(QWidget):
         self.btn_start.clicked.connect(self.start_process)
         left_layout.addWidget(self.btn_start)
 
-        # =========== 右侧栏 ===========
+        # 右侧
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(15)
 
         lbl_res = QLabel("📝 转换结果 (可编辑)")
@@ -408,18 +386,8 @@ class MainWindow(QWidget):
         self.text_area.setPlaceholderText("识别的文字会显示在这里...")
         self.text_area.setFont(QFont(UI_FONT, 20)) 
         self.text_area.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ddd;
-                border-radius: 15px;
-                padding: 20px;
-                background-color: #fafafa;
-                selection-background-color: #0078d7;
-                line-height: 160%;
-            }
-            QTextEdit:focus {
-                background-color: white;
-                border-color: #0078d7;
-            }
+            QTextEdit { border: 1px solid #ddd; border-radius: 15px; padding: 20px; background: #fafafa; selection-background-color: #0078d7; line-height: 160%; }
+            QTextEdit:focus { background: white; border-color: #0078d7; }
         """)
         right_layout.addWidget(self.text_area)
 
@@ -428,23 +396,16 @@ class MainWindow(QWidget):
         self.btn_copy.setFont(QFont(UI_FONT, 16, QFont.Weight.Bold))
         self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setStyleSheet("""
-            QPushButton {
-                background-color: white;
-                color: #333;
-                border: 1px solid #ddd;
-                border-radius: 12px;
-            }
-            QPushButton:hover { background-color: #f5f5f5; border-color: #aaa; }
+            QPushButton { background: white; color: #333; border: 1px solid #ddd; border-radius: 12px; }
+            QPushButton:hover { background: #f5f5f5; border-color: #aaa; }
         """)
         self.btn_copy.clicked.connect(self.copy_text)
         right_layout.addWidget(self.btn_copy)
 
         main_layout.addWidget(left_widget, 4)
         main_layout.addWidget(right_widget, 6)
-        
         self.setLayout(main_layout)
 
-    # --- 逻辑 ---
     def on_model_click(self, clicked_btn):
         for btn in self.model_btns:
             is_target = (btn == clicked_btn)
@@ -468,13 +429,7 @@ class MainWindow(QWidget):
         name = os.path.basename(path)
         self.import_area.setText(f"\n📄 已就绪：{name}\n(点击可替换)\n")
         self.import_area.setStyleSheet("""
-            QPushButton {
-                background-color: #f0fff4;
-                border: 2px solid #2ecc71;
-                border-radius: 20px;
-                color: #27ae60;
-                font-weight: bold;
-            }
+            QPushButton { background-color: #f0fff4; border: 2px solid #2ecc71; border-radius: 20px; color: #27ae60; font-weight: bold; }
             QPushButton:hover { background-color: #dcfce7; }
         """)
         self.lbl_status.setText("视频已加载，请点击开始")
@@ -482,13 +437,14 @@ class MainWindow(QWidget):
 
     def start_process(self):
         if not self.video_path: return
-
         self.import_area.setEnabled(False)
         for btn in self.model_btns: btn.setEnabled(False)
         self.text_area.clear()
 
         self.btn_start.start_processing()
-        # 注意：这里不立即启动 fake_progress，由 worker 决定
+        
+        # 🔥 关键修改：每 100ms 更新一次进度条
+        self.fake_progress_timer.start(100) 
 
         self.worker = WorkThread(self.video_path, self.selected_model)
         self.worker.status_signal.connect(self.lbl_status.setText) 
@@ -498,17 +454,16 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def update_fake_progress(self):
-        self.btn_start.increment_fake_progress(0.2)
+        # 让按钮自己决定怎么爬（根据上面的 39% 天花板逻辑）
+        self.btn_start.auto_creep_progress()
 
     def update_progress_ui(self, val, text_override):
+        # 真实进度来了，直接覆盖假进度
         self.btn_start.set_progress(val, text_override)
-        # 只有当下载阶段结束 (进度>=20) 且没有文字覆盖(下载信息)时，才启动心跳
-        if val >= 20 and text_override is None and not self.fake_progress_timer.isActive():
-            self.fake_progress_timer.start(100)
 
     def on_success(self, text):
         self.fake_progress_timer.stop()
-        self.btn_start.set_progress(100)
+        self.btn_start.set_progress(100, "转换完成")
         self.text_area.setPlainText(text)
         self.reset_ui()
         QMessageBox.information(self, "成功", "转换完成！")
@@ -533,9 +488,7 @@ class MainWindow(QWidget):
             QTimer.singleShot(1500, lambda: self.btn_copy.setText("📋 一键复制全部"))
     
     def closeEvent(self, event):
-        if self.fake_progress_timer.isActive():
-            self.fake_progress_timer.stop()
-        # 强制退出，不给任何弹窗机会
+        if self.fake_progress_timer.isActive(): self.fake_progress_timer.stop()
         os._exit(0)
 
 if __name__ == "__main__":
