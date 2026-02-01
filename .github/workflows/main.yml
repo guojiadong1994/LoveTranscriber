@@ -1,4 +1,4 @@
-name: Build LoveTranscriber (Portable Mode)
+name: Build LoveTranscriber (Product Release)
 
 on:
   push:
@@ -19,40 +19,26 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller PyQt6
 
-          # 安装项目依赖（比如 PyQt6）
-          if (Test-Path "requirements.txt") {
-            pip install -r requirements.txt
-          } elseif (Test-Path "LoveTranscriber/requirements.txt") {
-            pip install -r LoveTranscriber/requirements.txt
-          } else {
-            echo "No requirements.txt found, skipping."
-          }
-
-      - name: Build EXE (Portable, tools external)
+      - name: Build EXE (No Console, Clean UI)
         shell: pwsh
         run: |
-          if (Test-Path "main.py") {
-            $Target = "main.py"
-          } elseif (Test-Path "LoveTranscriber/main.py") {
-            cd LoveTranscriber
-            $Target = "main.py"
-          } else {
-            echo "Error: Missing main.py"
-            exit 1
-          }
+          if (Test-Path "main.py") { $Target = "main.py" }
+          elseif (Test-Path "LoveTranscriber/main.py") { cd LoveTranscriber; $Target = "main.py" }
+          else { echo "Error: Missing main.py"; exit 1 }
 
-          # ✅ 不打包 tools 目录（你手动复制到 exe 同级目录）
-          pyinstaller -D -c --clean --noconfirm `
-            -n "LoveTranscriber_Portable" `
+          # ✅ -w : 去除主程序黑框 (看起来像成品软件)
+          # ✅ 不打包 tools (依然保持外置，方便你放模型)
+          pyinstaller -D -w --clean --noconfirm `
+            -n "LoveTranscriber_Final" `
             $Target
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LoveTranscriber-Portable
+          name: LoveTranscriber-Final
           path: |
-            dist/LoveTranscriber_Portable
-            LoveTranscriber/dist/LoveTranscriber_Portable
+            dist/LoveTranscriber_Final
+            LoveTranscriber/dist/LoveTranscriber_Final
           overwrite: true
